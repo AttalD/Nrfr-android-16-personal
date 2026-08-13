@@ -35,9 +35,10 @@ jobs:
             https://raw.githubusercontent.com/Reginer/aosp-android-jar/main/android-36/android.jar \
             -o "$ANDROID_HOME/platforms/android-36/android.jar"
 
+      # The committed wrapper pins Gradle 8.13. The runner's system Gradle is 9.x, which AGP 8.x
+      # cannot run under, so never invoke `gradle` directly here.
       - name: Unit tests
         run: |
-          gradle wrapper --gradle-version 8.13
           chmod +x ./gradlew
           ./gradlew testDebugUnitTest --stacktrace
 

@@ -85,10 +85,9 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/Reginer/aosp-android-jar/refs/heads/main/android-36/android.jar -o $ANDROID_HOME/platforms/android-36/android.jar
         shell: bash
 
-      # 构建 Android APK
+      # 构建 Android APK（使用仓库内固定 Gradle 8.13 的 wrapper，勿用系统 gradle）
       - name: Build Android APK
         run: |
-          gradle wrapper
           chmod +x ./gradlew
           ./gradlew assembleDebug
         shell: bash
