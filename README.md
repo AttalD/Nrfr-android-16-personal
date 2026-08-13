@@ -39,7 +39,7 @@
 > 本分支改用框架自带的 **CarrierService 扩展点**（`setCarrierTestOverride` +
 > `setCarrierServicePackageOverride`）实现同样的效果，**依然免 Root**，并自动兼容未打补丁的旧系统。
 >
-> 详见 **[docs/ANDROID16.md](docs/ANDROID16.md)**。
+> 详见 **[docs/ANDROID16.md](docs/ANDROID16.md)**（原理）与 **[docs/TESTING.md](docs/TESTING.md)**（测试与回滚）。
 
 Nrfr 是一款强大的 SIM 卡国家码修改工具，无需 Root 权限即可修改 SIM 卡国家码。本项目完全基于 Android 系统原生 API 实现，不依赖
 Xposed、Magisk 等任何第三方框架，仅通过调用系统级接口实现功能。通过修改国家码，你可以：
