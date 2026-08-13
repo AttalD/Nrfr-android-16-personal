@@ -8,6 +8,7 @@ import android.telephony.SubscriptionManager
 import android.util.Log
 import androidx.annotation.RequiresApi
 import com.github.nrfr.data.OverrideStore
+import com.github.nrfr.diag.CarrierServiceBridge
 import com.github.nrfr.manager.CarrierConfigKeys
 import com.github.nrfr.manager.OverrideSpec
 
@@ -40,6 +41,17 @@ class NrfrCarrierService : CarrierService() {
         buildConfig(legacySubId())
 
     private fun buildConfig(subscriptionId: Int): PersistableBundle {
+        CarrierServiceBridge.onLoadConfigCalled(subscriptionId)
+
+        // Diagnostics probe: serve only the sentinel token, so the round trip can be proven
+        // without putting any real telephony value into the config.
+        CarrierServiceBridge.probeToken?.let { token ->
+            Log.i(TAG, "onLoadConfig(subId=$subscriptionId) -> PROBE token")
+            return PersistableBundle().apply {
+                putString(CarrierServiceBridge.PROBE_KEY, token)
+            }
+        }
+
         val spec = runCatching { OverrideStore.get(this, subscriptionId) }
             .getOrElse {
                 Log.e(TAG, "failed to read override store for subId=$subscriptionId", it)

@@ -13,6 +13,7 @@ import com.github.nrfr.data.OverrideStore
 import com.github.nrfr.manager.ApplyResult
 import com.github.nrfr.manager.CarrierConfigManager
 import com.github.nrfr.ui.screens.AboutScreen
+import com.github.nrfr.ui.screens.DiagnosticsScreen
 import com.github.nrfr.ui.screens.MainScreen
 import com.github.nrfr.ui.screens.ShizukuNotReadyScreen
 import com.github.nrfr.ui.theme.NrfrTheme
@@ -22,6 +23,7 @@ import rikka.shizuku.Shizuku
 class MainActivity : ComponentActivity() {
     private var isShizukuReady by mutableStateOf(false)
     private var showAbout by mutableStateOf(false)
+    private var showDiagnostics by mutableStateOf(false)
     private var reapplyDone = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,12 +52,17 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             NrfrTheme {
-                if (showAbout) {
-                    AboutScreen(onBack = { showAbout = false })
-                } else if (isShizukuReady) {
-                    MainScreen(onShowAbout = { showAbout = true })
-                } else {
-                    ShizukuNotReadyScreen()
+                when {
+                    showAbout -> AboutScreen(onBack = { showAbout = false })
+                    showDiagnostics && isShizukuReady ->
+                        DiagnosticsScreen(onBack = { showDiagnostics = false })
+
+                    isShizukuReady -> MainScreen(
+                        onShowAbout = { showAbout = true },
+                        onShowDiagnostics = { showDiagnostics = true }
+                    )
+
+                    else -> ShizukuNotReadyScreen()
                 }
             }
         }

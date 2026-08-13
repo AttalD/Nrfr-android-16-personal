@@ -3,6 +3,9 @@
           xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- 诊断界面用于读取网络制式/数据开关等状态；不读取 IMEI/IMSI 等设备标识。 -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
 
     <application
             android:allowBackup="true"

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,7 +27,7 @@ import com.github.nrfr.model.SimCardInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(onShowAbout: () -> Unit) {
+fun MainScreen(onShowAbout: () -> Unit, onShowDiagnostics: () -> Unit = {}) {
     val context = LocalContext.current
     var selectedSimCard by remember { mutableStateOf<SimCardInfo?>(null) }
     var selectedCountryCode by remember { mutableStateOf("") }
@@ -72,6 +73,9 @@ fun MainScreen(onShowAbout: () -> Unit) {
                     }
                 },
                 actions = {
+                    IconButton(onClick = onShowDiagnostics) {
+                        Icon(Icons.Default.Build, contentDescription = "诊断")
+                    }
                     IconButton(onClick = onShowAbout) {
                         Icon(Icons.Default.Info, contentDescription = "关于")
                     }

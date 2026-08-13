@@ -159,6 +159,23 @@ object PrivilegedTelephony {
         m.invoke(proxy, subId, carrierServicePackage, callingPackage)
     }
 
+    /**
+     * Which package the framework currently has bound as the CarrierService for [slotIndex],
+     * or null when none.
+     *
+     * Read-only, and the single most important safety input before probing: if some other
+     * carrier-privileged app is already bound, taking its place would drop the config it supplies
+     * (potentially VoLTE/IMS settings), which is well beyond "diagnostics".
+     */
+    fun carrierServicePackage(slotIndex: Int): String? {
+        val (iface, proxy) = telephony()
+        val m = method(
+            iface, "getCarrierServicePackageNameForLogicalSlot",
+            Int::class.javaPrimitiveType!!
+        )
+        return m.invoke(proxy, slotIndex) as? String
+    }
+
     // ------------------------------------------------------------- SIM facts
 
     /** The SIM's real MCC+MNC, e.g. "46000". Requires no runtime permission. */
