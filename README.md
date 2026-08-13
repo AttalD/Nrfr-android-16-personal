@@ -106,7 +106,9 @@ Nrfr 通过调用 Android 系统级 API（CarrierConfigLoader）修改系统内�
 - 🔄 功能完善
    - 支持随时还原修改
    - 支持双卡设备，可分别配置
-   - 一次修改永久生效，重启后保持
+   - 一次修改立即生效，无需重启
+   - ⚠️ Android 16 (CarrierService 方案) 下**不跨重启保持**：重启后需重新启动 Shizuku
+     并打开 Nrfr，配置会自动重新应用（详见 [docs/TESTING.md](docs/TESTING.md) §9）
 - 🚀 简单易用
    - 一键启动工具
    - 智能检测设备和 SIM 卡状态
