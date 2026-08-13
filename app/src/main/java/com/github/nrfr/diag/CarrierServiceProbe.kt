@@ -40,7 +40,7 @@ object CarrierServiceProbe {
         val apiStep = checkApis()
         steps += apiStep
         if (!apiStep.ok) {
-            return ProbeResult(steps, false, false, true)
+            return ProbeResult(steps, false, false)
         }
 
         // ---- 2. safety precondition ------------------------------------------------------
@@ -50,7 +50,7 @@ object CarrierServiceProbe {
                 "查询当前 CarrierService", false,
                 existing.exceptionOrNull()?.let { "${it.javaClass.simpleName}: ${it.message}" }
             )
-            return ProbeResult(steps, false, false, true)
+            return ProbeResult(steps, false, false)
         }
         val existingPkg = existing.getOrNull()
         if (!existingPkg.isNullOrBlank() && existingPkg != context.packageName) {
@@ -59,7 +59,7 @@ object CarrierServiceProbe {
                 "已有其它应用被绑定为 CarrierService ($existingPkg)。顶替它会丢失它提供的配置，" +
                         "超出诊断范围，已中止。"
             )
-            return ProbeResult(steps, false, false, true)
+            return ProbeResult(steps, false, false)
         }
         steps += ProbeStep("安全前置检查", true, "当前无其它 CarrierService 绑定")
 
@@ -67,7 +67,7 @@ object CarrierServiceProbe {
         val certs = PrivilegedTelephony.ownCertSha256(context)
         if (certs.isEmpty()) {
             steps += ProbeStep("读取本应用签名哈希", false, "无法读取签名证书")
-            return ProbeResult(steps, false, false, true)
+            return ProbeResult(steps, false, false)
         }
         steps += ProbeStep("读取本应用签名哈希", true, "SHA-256 ${certs.first().take(16)}…")
 
@@ -159,13 +159,24 @@ object CarrierServiceProbe {
         waitFor(2_000L) { readToken(context, subId) == null }
 
         val after = DiagnosticCollector.collectIdentity(context, subId)
-        val changed = ReportFormatter.diffIdentity(before, after)
+        val comparisons = ReportFormatter.compare(before, after)
+        val mutations = comparisons.filter { it.isMutation }
+        val notes = comparisons.filter { it.isNoteworthy }
+
         steps += ProbeStep(
-            "探测后已完全还原", changed.isEmpty(),
-            if (changed.isEmpty()) "SIM/网络身份值与探测前完全一致"
-            else "以下值发生变化: ${changed.joinToString(", ")}"
+            "探测后身份值已还原", mutations.isEmpty(),
+            if (mutations.isEmpty()) "8 项身份标识与探测前完全一致"
+            else "以下身份值发生变化: ${mutations.joinToString(", ") { it.key }}"
         )
-        return ProbeResult(steps, invoked, applied, changed.isEmpty(), changed)
+        if (notes.isNotEmpty()) {
+            // Reported, but explicitly NOT a failure: a field that merely became readable while we
+            // briefly held carrier privileges says nothing about the SIM or the network.
+            steps += ProbeStep(
+                "观测差异（不影响结论）", true,
+                notes.joinToString("; ") { ReportFormatter.describe(it) }
+            )
+        }
+        return ProbeResult(steps, invoked, applied, comparisons)
     }
 
     private fun checkApis(): ProbeStep {

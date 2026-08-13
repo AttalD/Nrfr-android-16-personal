@@ -70,17 +70,77 @@ data class ProbeStep(
     val detail: String? = null
 )
 
+/**
+ * 探测前后单个值的比较结果。
+ *
+ * The distinction that matters: a value that simply *became readable* is a measurement artifact of
+ * temporarily holding carrier privileges, not evidence that anything about the SIM or the network
+ * moved. Collapsing the two was a real bug — `data_network_type` throws `SecurityException`
+ * without READ_PHONE_STATE, then reads fine once we hold carrier privileges, which looked
+ * identical to a mutation.
+ */
+enum class ComparisonOutcome(val label: String) {
+    UNCHANGED("未变"),
+
+    /** 真正的变化：两次都读到了值，但值不同。**只有这一种算作身份变更。** */
+    CHANGED("已变化"),
+
+    /** 探测前读不到、探测后读到了 —— 权限观测差异，不是变更。 */
+    BECAME_READABLE("探测前不可读 → 探测后可读（观测差异，不算变更）"),
+
+    /** 探测前读得到、探测后读不到 —— 同样是观测差异。 */
+    BECAME_UNREADABLE("探测前可读 → 探测后不可读（观测差异，不算变更）"),
+
+    /** 两次都读不到，无法比较。 */
+    NOT_COMPARABLE("两次均不可读，无法比较")
+}
+
+data class ValueComparison(
+    val key: String,
+    val label: String,
+    val outcome: ComparisonOutcome,
+    val before: String?,
+    val after: String?,
+    /** 是否属于身份标识集合（只有这些才参与"是否已还原"的判定）。 */
+    val isIdentity: Boolean
+) {
+    /** 唯一会导致"未还原"结论的情况。 */
+    val isMutation: Boolean get() = isIdentity && outcome == ComparisonOutcome.CHANGED
+
+    /** 值得在报告中提一句、但不影响结论的情况。 */
+    val isNoteworthy: Boolean
+        get() = outcome == ComparisonOutcome.BECAME_READABLE ||
+                outcome == ComparisonOutcome.BECAME_UNREADABLE ||
+                (outcome == ComparisonOutcome.CHANGED && !isIdentity)
+}
+
 data class ProbeResult(
     val steps: List<ProbeStep>,
     /** 框架是否真的回调了我们的 onLoadConfig。 */
     val onLoadConfigInvoked: Boolean,
     /** 我们返回的哨兵键是否出现在最终合并后的 CarrierConfig 中。 */
     val configApplied: Boolean,
-    /** 探测前后所有身份值是否完全一致。 */
-    val identityUnchanged: Boolean,
-    val changedValues: List<String> = emptyList()
+    val comparisons: List<ValueComparison> = emptyList()
 ) {
-    val succeeded: Boolean get() = steps.all { it.ok } && onLoadConfigInvoked && configApplied
+    /** 真正发生变化的身份值。 */
+    val mutations: List<ValueComparison> get() = comparisons.filter { it.isMutation }
+
+    /** 观测差异等，仅供参考。 */
+    val notes: List<ValueComparison> get() = comparisons.filter { it.isNoteworthy }
+
+    /**
+     * **Android 16 的 CarrierService 机制在本机是否可用。**
+     *
+     * Deliberately independent of revert hygiene: the framework binding us, calling
+     * `onLoadConfig()` and merging what we returned *is* the mechanism working. A messy revert
+     * would be a separate problem and must never be reported as "mechanism unavailable".
+     */
+    val mechanismWorks: Boolean get() = onLoadConfigInvoked && configApplied
+
+    /** 探测后身份值是否完好还原。 */
+    val revertClean: Boolean get() = mutations.isEmpty()
+
+    val succeeded: Boolean get() = mechanismWorks && revertClean
 }
 
 data class DiagnosticReport(

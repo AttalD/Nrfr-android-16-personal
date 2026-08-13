@@ -36,60 +36,179 @@ class DiagnosticReportTest {
         assertFalse(report(carrierService = "com.example.carrier").probeIsSafe)
     }
 
-    // ------------------------------------------------------------ identity diff
+    // ------------------------------------------------------------ comparison
+
+    private fun unreadable(key: String, source: ValueSource) = DiagnosticValue(
+        key, key, null, source, Mutability.OUT_OF_SCOPE, AppVisibility.NO_PERMISSION,
+        error = "SecurityException: getDataNetworkTypeForSubscriber"
+    )
+
+    private fun compareOne(
+        key: String,
+        before: DiagnosticValue,
+        after: DiagnosticValue
+    ) = ReportFormatter.compare(listOf(before), listOf(after)).single { it.key == key }
 
     @Test
-    fun `identity diff ignores non-identity sources`() {
-        // Data state and network type legitimately fluctuate on their own; flagging them would
-        // make every probe look like it broke something.
-        val before = listOf(
-            value("sim_operator", "46000", ValueSource.SIM),
-            value("data_state", "CONNECTED", ValueSource.FRAMEWORK)
+    fun `becoming readable is an observation artifact, never a mutation`() {
+        // Regression test for the false failure seen on a real OnePlus 12R: data_network_type
+        // threw SecurityException before the probe and read "5G NR" after, because the probe
+        // temporarily held carrier privileges. Nothing about the network changed.
+        val c = compareOne(
+            "data_network_type",
+            unreadable("data_network_type", ValueSource.NETWORK),
+            value("data_network_type", "5G NR", ValueSource.NETWORK)
         )
-        val after = listOf(
-            value("sim_operator", "46000", ValueSource.SIM),
-            value("data_state", "DISCONNECTED", ValueSource.FRAMEWORK)
+        assertEquals(ComparisonOutcome.BECAME_READABLE, c.outcome)
+        assertFalse(c.isMutation)
+        assertTrue(c.isNoteworthy)
+    }
+
+    @Test
+    fun `becoming unreadable is also not a mutation`() {
+        val c = compareOne(
+            "data_network_type",
+            value("data_network_type", "5G NR", ValueSource.NETWORK),
+            unreadable("data_network_type", ValueSource.NETWORK)
         )
-        assertEquals(emptyList<String>(), ReportFormatter.diffIdentity(before, after))
+        assertEquals(ComparisonOutcome.BECAME_UNREADABLE, c.outcome)
+        assertFalse(c.isMutation)
     }
 
     @Test
-    fun `identity diff catches a changed SIM operator`() {
-        val before = listOf(value("sim_operator", "46000", ValueSource.SIM))
-        val after = listOf(value("sim_operator", "44010", ValueSource.SIM))
-        assertEquals(listOf("sim_operator"), ReportFormatter.diffIdentity(before, after))
+    fun `unreadable both times is not comparable`() {
+        val c = compareOne(
+            "data_network_type",
+            unreadable("data_network_type", ValueSource.NETWORK),
+            unreadable("data_network_type", ValueSource.NETWORK)
+        )
+        assertEquals(ComparisonOutcome.NOT_COMPARABLE, c.outcome)
+        assertFalse(c.isMutation)
     }
 
     @Test
-    fun `identity diff catches a value that was blanked`() {
-        // The specific hazard of passing null mccmnc to setCarrierTestOverride.
-        val before = listOf(value("sim_operator", "46000", ValueSource.SIM))
-        val after = listOf(value("sim_operator", null, ValueSource.SIM))
-        assertEquals(listOf("sim_operator"), ReportFormatter.diffIdentity(before, after))
+    fun `a genuinely changed SIM operator is a mutation`() {
+        val c = compareOne(
+            "sim_operator",
+            value("sim_operator", "46000", ValueSource.SIM),
+            value("sim_operator", "44010", ValueSource.SIM)
+        )
+        assertEquals(ComparisonOutcome.CHANGED, c.outcome)
+        assertTrue(c.isMutation)
     }
 
     @Test
-    fun `identity diff catches network values too`() {
-        val before = listOf(value("network_country_iso", "cn", ValueSource.NETWORK))
-        val after = listOf(value("network_country_iso", "jp", ValueSource.NETWORK))
-        assertEquals(listOf("network_country_iso"), ReportFormatter.diffIdentity(before, after))
+    fun `a blanked SIM operator is a mutation`() {
+        // The specific hazard of passing null mccmnc to setCarrierTestOverride: the value is still
+        // readable, it just became empty. That must not be confused with an unreadable field.
+        val c = compareOne(
+            "sim_operator",
+            value("sim_operator", "46000", ValueSource.SIM),
+            value("sim_operator", "", ValueSource.SIM)
+        )
+        assertEquals(ComparisonOutcome.CHANGED, c.outcome)
+        assertTrue(c.isMutation)
+    }
+
+    @Test
+    fun `all eight required identity keys participate in the verdict`() {
+        val required = setOf(
+            "sim_operator", "sim_operator_name", "sim_country_iso", "sim_carrier_id",
+            "network_operator", "network_operator_name", "network_country_iso", "network_roaming"
+        )
+        assertEquals(required, ReportFormatter.IDENTITY_KEYS)
+    }
+
+    @Test
+    fun `non-identity changes are reported but do not fail the verdict`() {
+        // Radio state legitimately fluctuates (cell reselection, 5G to LTE handover).
+        val c = compareOne(
+            "data_network_type",
+            value("data_network_type", "5G NR", ValueSource.NETWORK),
+            value("data_network_type", "4G LTE", ValueSource.NETWORK)
+        )
+        assertEquals(ComparisonOutcome.CHANGED, c.outcome)
+        assertFalse("radio state is not an identity claim", c.isMutation)
+        assertTrue(c.isNoteworthy)
+    }
+
+    @Test
+    fun `identical identity values compare as unchanged`() {
+        val c = compareOne(
+            "network_country_iso",
+            value("network_country_iso", "cn", ValueSource.NETWORK),
+            value("network_country_iso", "cn", ValueSource.NETWORK)
+        )
+        assertEquals(ComparisonOutcome.UNCHANGED, c.outcome)
+        assertFalse(c.isMutation)
+        assertFalse(c.isNoteworthy)
+    }
+
+    @Test
+    fun `describe wording marks a readability artifact as not a mutation`() {
+        val text = ReportFormatter.describe(
+            compareOne(
+                "data_network_type",
+                unreadable("data_network_type", ValueSource.NETWORK),
+                value("data_network_type", "5G NR", ValueSource.NETWORK)
+            )
+        )
+        assertTrue(text.contains("data_network_type"))
+        assertTrue(text.contains("不算变更"))
     }
 
     // ------------------------------------------------------------ probe result
 
+    private fun probe(
+        invoked: Boolean,
+        applied: Boolean,
+        comparisons: List<ValueComparison> = emptyList()
+    ) = ProbeResult(listOf(ProbeStep("register", true)), invoked, applied, comparisons)
+
     @Test
-    fun `probe succeeds only when every part of the chain worked`() {
-        fun p(steps: List<ProbeStep>, invoked: Boolean, applied: Boolean) =
-            ProbeResult(steps, invoked, applied, true)
-
-        val ok = listOf(ProbeStep("a", true), ProbeStep("b", true))
-        assertTrue(p(ok, invoked = true, applied = true).succeeded)
-
+    fun `mechanism works when the framework called back and merged our config`() {
+        assertTrue(probe(invoked = true, applied = true).mechanismWorks)
         // A registered provider that is never called back is not a working mechanism.
-        assertFalse(p(ok, invoked = false, applied = true).succeeded)
+        assertFalse(probe(invoked = false, applied = true).mechanismWorks)
         // Called back but the config never landed is likewise a failure.
-        assertFalse(p(ok, invoked = true, applied = false).succeeded)
-        assertFalse(p(ok + ProbeStep("c", false), invoked = true, applied = true).succeeded)
+        assertFalse(probe(invoked = true, applied = false).mechanismWorks)
+    }
+
+    @Test
+    fun `mechanism verdict is independent of revert hygiene`() {
+        // The core regression: a dirty revert is a separate problem and must never be reported
+        // as "the Android 16 mechanism is unavailable".
+        val dirty = probe(
+            invoked = true, applied = true,
+            comparisons = listOf(
+                ValueComparison(
+                    "sim_operator", "sim_operator", ComparisonOutcome.CHANGED,
+                    "46000", "44010", isIdentity = true
+                )
+            )
+        )
+        assertTrue("mechanism still demonstrated", dirty.mechanismWorks)
+        assertFalse("but revert was not clean", dirty.revertClean)
+        assertFalse(dirty.succeeded)
+    }
+
+    @Test
+    fun `a readability artifact alone leaves both verdicts green`() {
+        // Exactly the OnePlus 12R case that previously reported failure.
+        val p = probe(
+            invoked = true, applied = true,
+            comparisons = listOf(
+                ValueComparison(
+                    "data_network_type", "data_network_type", ComparisonOutcome.BECAME_READABLE,
+                    null, "5G NR", isIdentity = false
+                )
+            )
+        )
+        assertTrue(p.mechanismWorks)
+        assertTrue(p.revertClean)
+        assertTrue(p.succeeded)
+        assertEquals(1, p.notes.size)
+        assertTrue(p.mutations.isEmpty())
     }
 
     // ------------------------------------------------------------ formatting
@@ -117,20 +236,23 @@ class DiagnosticReportTest {
     }
 
     @Test
-    fun `report surfaces a failed revert prominently`() {
+    fun `report surfaces a failed revert prominently but still credits the mechanism`() {
         val text = ReportFormatter.format(
             report(
-                probe = ProbeResult(
-                    steps = listOf(ProbeStep("register", true)),
-                    onLoadConfigInvoked = true,
-                    configApplied = true,
-                    identityUnchanged = false,
-                    changedValues = listOf("sim_operator")
+                probe = probe(
+                    invoked = true, applied = true,
+                    comparisons = listOf(
+                        ValueComparison(
+                            "sim_operator", "sim_operator", ComparisonOutcome.CHANGED,
+                            "46000", "44010", isIdentity = true
+                        )
+                    )
                 )
             )
         )
-        assertTrue(text.contains("发生变化的值"))
         assertTrue(text.contains("sim_operator"))
+        assertTrue("mechanism must still be reported as available", text.contains("方案在本机可用"))
+        assertTrue(text.contains("存在未还原的身份值"))
     }
 
     @Test

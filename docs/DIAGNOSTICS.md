@@ -4,6 +4,47 @@
 
 ---
 
+## 0. 真机验证结论（OnePlus 12R / OxygenOS 16.0.5 / Android 16）
+
+**Android 16 的 CarrierService 方案在该真机上已验证可用。** 实测结果：
+
+| 环节 | 结果 |
+| --- | --- |
+| ITelephony 隐藏方法可用性 | ✅ 三个方法均存在 |
+| `setCarrierTestOverride` | ✅ 成功 |
+| `setCarrierServicePackageOverride` | ✅ 成功 |
+| `notifyConfigChangedForSubId` | ✅ 成功 |
+| 框架回调 `CarrierService.onLoadConfig()` | ✅ 被调用 |
+| 返回的 CarrierConfig 合并生效 | ✅ 哨兵键 `nrfr_probe_token` 可读回 |
+| SIM 身份值 | ✅ 未变 |
+| 网络身份值 | ✅ 未变 |
+| 移动数据 | ✅ 保持连接 |
+| APN | ✅ 保持 CMNET / cmnet |
+| 网络制式 | ✅ 保持 5G NR |
+
+**已验证的是"机制本身可用"**，即：本应用能被框架接受为 CarrierService，`onLoadConfig()`
+会被回调，返回的配置会被真正合并进最终 CarrierConfig。
+
+**尚未验证的是**：用它下发真实的国家码覆盖后，`getSimCountryIso()` 是否随之改变，
+以及 TikTok 的实际反应。探测只下发了一个无意义的随机哨兵键。
+
+### 已修复的探测逻辑缺陷
+
+首次真机探测曾**误报失败**，原因是 `data_network_type` 在探测前后表现为：
+
+```
+探测前: 读取失败: SecurityException: getDataNetworkTypeForSubscriber
+探测后: 5G NR
+```
+
+旧的比较逻辑只比较值本身，于是把"从读不到变成读得到"当成了"值发生了变化"。
+这纯粹是**观测差异**：探测期间临时持有 carrier privileges 让这个字段变得可读，
+与 SIM 或网络本身毫无关系。
+
+修复方式见 [§4.3](#43-探测前后比较的语义)。
+
+---
+
 ## 1. 为什么"国家"在 Android 里不是一个值
 
 风控类应用之所以难绕，是因为"这台设备在哪个国家"在框架里有**至少四个互不相同的来源**，
@@ -127,6 +168,50 @@
 3. **CarrierConfigLoader 会把运营商应用的配置缓存到 XML**，因此哨兵键可能在
    `/data/user_de/0/com.android.phone/files/` 下留下一个以本应用包名命名的缓存文件。
    还原后不再被使用，内容也只有那个随机 token。
+
+### 4.3 探测前后比较的语义
+
+每个值的比较结果被分成五类，**只有 `CHANGED` 且属于身份标识集合**才会导致"未还原"的结论：
+
+| 分类 | 含义 | 算作变更？ |
+| --- | --- | --- |
+| `UNCHANGED` | 两次都读到，值相同 | 否 |
+| `CHANGED` | 两次都读到，值不同 | **是**（仅限身份项） |
+| `BECAME_READABLE` | 探测前不可读、探测后可读 | 否（观测差异） |
+| `BECAME_UNREADABLE` | 探测前可读、探测后不可读 | 否（观测差异） |
+| `NOT_COMPARABLE` | 两次都读不到 | 否 |
+
+"读不到"由 `DiagnosticValue.error != null` 表示，**不是**用 `null` 值表示 ——
+因为 `null` 和 `""` 都是合法的读数（例如把 mccmnc 传 null 导致属性被清空，那是真正的变更）。
+
+参与判定的**身份标识集合**是显式列举的 8 项：
+
+```
+sim_operator, sim_operator_name, sim_country_iso, sim_carrier_id,
+network_operator, network_operator_name, network_country_iso, network_roaming
+```
+
+`data_network_type` **刻意不在其中**：它是无线状态，会因小区重选、5G↔LTE 切换自行变化，
+本来就不是身份声明。它仍会被采集与展示，但只作为"观测差异"呈现，例如：
+
+```
+⚠️ data_network_type: 探测前不可读、探测后可读（值 5G NR）；属观测差异，不算变更
+```
+
+### 4.4 两个彼此独立的结论
+
+报告现在分别给出：
+
+- **机制结论** = `onLoadConfig` 被回调 && 配置已合并 → Android 16 方案是否可用
+- **还原结论** = 是否存在真正变更的身份值
+
+二者**互不影响**。还原不干净是另一个问题，绝不会被表述成"机制不可用"。
+
+### 4.5 让网络制式变得可比较
+
+诊断界面现在会在进入时申请 `READ_PHONE_STATE`。授予后 `getDataNetworkType()`
+在探测前后都可读，于是它成为一个**真正可比较**的字段而非权限伪影；
+若用户拒绝授权，则退化为 `NOT_COMPARABLE`，同样不会被误判为变更。
 
 ### 会自动拒绝执行的情况
 

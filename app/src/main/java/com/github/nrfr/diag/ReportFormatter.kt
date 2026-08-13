@@ -35,13 +35,32 @@ object ReportFormatter {
             for (s in p.steps) {
                 appendLine("${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}")
             }
+            appendLine()
             appendLine("onLoadConfig 被回调: ${if (p.onLoadConfigInvoked) "是" else "否"}")
-            appendLine("返回的配置已生效: ${if (p.configApplied) "是" else "否"}")
-            appendLine("探测前后身份值未变: ${if (p.identityUnchanged) "是" else "否"}")
-            if (p.changedValues.isNotEmpty()) {
-                appendLine("⚠️ 发生变化的值: ${p.changedValues.joinToString(", ")}")
+            appendLine("返回的配置已合并生效: ${if (p.configApplied) "是" else "否"}")
+            appendLine(
+                ">>> 机制结论: ${
+                    if (p.mechanismWorks) "Android 16 CarrierService 方案在本机可用 ✅"
+                    else "机制不可用 ❌"
+                }"
+            )
+            appendLine(
+                ">>> 还原结论: ${
+                    if (p.revertClean) "身份值已完好还原 ✅"
+                    else "存在未还原的身份值 ❌"
+                }"
+            )
+            if (p.mutations.isNotEmpty()) {
+                appendLine("发生变更的身份值:")
+                p.mutations.forEach { appendLine("  ${describe(it)}") }
             }
-            appendLine("总体结论: ${if (p.succeeded) "机制在本机可用" else "机制在本机不可用"}")
+            if (p.notes.isNotEmpty()) {
+                appendLine("观测差异（不影响结论）:")
+                p.notes.forEach { appendLine("  ${describe(it)}") }
+            }
+            appendLine()
+            appendLine("身份值逐项对比:")
+            p.comparisons.filter { it.isIdentity }.forEach { appendLine("  ${describe(it)}") }
             appendLine()
         } ?: appendLine("--- CarrierService 机制探测: 未执行 ---\n")
 
@@ -57,16 +76,76 @@ object ReportFormatter {
             .forEach { appendLine("  • ${it.label}") }
     }
 
-    /** 探测前后的身份值对比，返回发生变化的项。 */
-    fun diffIdentity(
+    /**
+     * 参与"是否已还原"判定的身份标识集合。
+     *
+     * Deliberately explicit rather than "everything from the SIM/NETWORK sources": radio state
+     * such as `data_network_type` legitimately fluctuates on its own (cell reselection, 5G↔LTE
+     * handover) and is not an identity claim, so including it produced false "not reverted"
+     * verdicts.
+     */
+    val IDENTITY_KEYS = setOf(
+        "sim_operator",
+        "sim_operator_name",
+        "sim_country_iso",
+        "sim_carrier_id",
+        "network_operator",
+        "network_operator_name",
+        "network_country_iso",
+        "network_roaming"
+    )
+
+    /**
+     * 逐项比较探测前后的值。
+     *
+     * A read that failed is represented by [DiagnosticValue.error] being non-null — crucially
+     * *not* by a null value, because "" and null are legitimate readings. Only a value that was
+     * readable both times and differs counts as [ComparisonOutcome.CHANGED].
+     */
+    fun compare(
         before: List<DiagnosticValue>,
         after: List<DiagnosticValue>
-    ): List<String> {
-        val identitySources = setOf(ValueSource.SIM, ValueSource.NETWORK)
-        val beforeMap = before.filter { it.source in identitySources }.associate { it.key to it.value }
-        val afterMap = after.filter { it.source in identitySources }.associate { it.key to it.value }
-        return (beforeMap.keys + afterMap.keys)
-            .filter { beforeMap[it] != afterMap[it] }
-            .sorted()
+    ): List<ValueComparison> {
+        val b = before.associateBy { it.key }
+        val a = after.associateBy { it.key }
+        return (b.keys + a.keys).sorted().map { key ->
+            val bv = b[key]
+            val av = a[key]
+            val bReadable = bv != null && bv.error == null
+            val aReadable = av != null && av.error == null
+            val outcome = when {
+                !bReadable && !aReadable -> ComparisonOutcome.NOT_COMPARABLE
+                !bReadable -> ComparisonOutcome.BECAME_READABLE
+                !aReadable -> ComparisonOutcome.BECAME_UNREADABLE
+                bv!!.value == av!!.value -> ComparisonOutcome.UNCHANGED
+                else -> ComparisonOutcome.CHANGED
+            }
+            ValueComparison(
+                key = key,
+                label = (bv ?: av)?.label ?: key,
+                outcome = outcome,
+                before = bv?.let { if (it.error != null) null else it.value },
+                after = av?.let { if (it.error != null) null else it.value },
+                isIdentity = key in IDENTITY_KEYS
+            )
+        }
+    }
+
+    /** 单行描述，用于报告与界面。 */
+    fun describe(c: ValueComparison): String = when (c.outcome) {
+        ComparisonOutcome.CHANGED ->
+            "${if (c.isIdentity) "❌" else "ℹ️"} ${c.key}: ${c.before} → ${c.after}" +
+                    if (c.isIdentity) "（身份变更）" else "（非身份项，不影响结论）"
+
+        ComparisonOutcome.BECAME_READABLE ->
+            "⚠️ ${c.key}: 探测前不可读、探测后可读（值 ${c.after}）；属观测差异，不算变更"
+
+        ComparisonOutcome.BECAME_UNREADABLE ->
+            "⚠️ ${c.key}: 探测前可读（值 ${c.before}）、探测后不可读；属观测差异，不算变更"
+
+        ComparisonOutcome.NOT_COMPARABLE ->
+            "➖ ${c.key}: 两次均不可读，无法比较"
+
+        ComparisonOutcome.UNCHANGED -> "✅ ${c.key}: 未变"
     }
 }

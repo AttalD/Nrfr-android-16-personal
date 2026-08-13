@@ -1,9 +1,14 @@
 package com.github.nrfr.ui.screens
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -38,6 +43,7 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
 
     val simCards: List<SimCardInfo> = remember(context) { CarrierConfigManager.getSimCards(context) }
     var selected by remember { mutableStateOf(simCards.firstOrNull()) }
+
     var report by remember { mutableStateOf<DiagnosticReport?>(null) }
     var busy by remember { mutableStateOf(false) }
     var busyLabel by remember { mutableStateOf("") }
@@ -50,6 +56,22 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                 DiagnosticCollector.collect(context, sim.slot - 1, sim.subId)
             }
             busy = false
+        }
+    }
+
+    // getDataNetworkType() throws SecurityException without READ_PHONE_STATE. Asking for it up
+    // front makes the network type readable *both* before and after the probe, so it becomes a
+    // genuinely comparable field rather than a permission artifact. If it is denied, the
+    // comparison degrades to "not comparable" instead of looking like a mutation.
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { selected?.let { collect(it) } }
+
+    LaunchedEffect(Unit) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            permissionLauncher.launch(Manifest.permission.READ_PHONE_STATE)
         }
     }
 
@@ -244,19 +266,45 @@ private fun ProbeCard(report: DiagnosticReport, enabled: Boolean, onRun: () -> U
                     )
                 }
                 Spacer(Modifier.height(8.dp))
+
+                // Two independent verdicts. A field merely becoming readable must never drag the
+                // mechanism verdict down.
                 Text(
-                    if (p.succeeded) "结论：机制在本机可用 ✅" else "结论：机制在本机不可用 ❌",
+                    if (p.mechanismWorks) "机制结论：Android 16 CarrierService 方案在本机可用 ✅"
+                    else "机制结论：不可用 ❌",
                     style = MaterialTheme.typography.titleSmall,
-                    color = if (p.succeeded) MaterialTheme.colorScheme.primary
+                    color = if (p.mechanismWorks) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.error
                 )
-                if (!p.identityUnchanged) {
+                Text(
+                    if (p.revertClean) "还原结论：身份值已完好还原 ✅"
+                    else "还原结论：存在未还原的身份值 ❌",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (p.revertClean) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error
+                )
+
+                if (p.mutations.isNotEmpty()) {
                     Text(
-                        "⚠️ 探测前后以下值发生变化：${p.changedValues.joinToString(", ")}\n" +
+                        "⚠️ 以下身份值发生变化：${p.mutations.joinToString(", ") { it.key }}\n" +
                                 "请到主界面点击「还原设置」。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
+                }
+                if (p.notes.isNotEmpty()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "观测差异（不影响结论）",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                    p.notes.forEach {
+                        Text(
+                            ReportFormatter.describe(it),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
             }
