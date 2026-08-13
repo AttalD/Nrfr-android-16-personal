@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
     <application
             android:allowBackup="true"
             android:dataExtractionRules="@xml/data_extraction_rules"
@@ -23,6 +25,31 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!--
+          Carrier config provider used on Android 16 (and any build where the 2025-10 patch blocks
+          `overrideConfig` for the shell UID). The system binds this only while
+          `setCarrierServicePackageOverride` names us and we hold carrier privileges; the
+          BIND_CARRIER_SERVICES permission ensures nothing but the platform can bind it.
+        -->
+        <service
+                android:name=".service.NrfrCarrierService"
+                android:exported="true"
+                android:permission="android.permission.BIND_CARRIER_SERVICES">
+            <intent-filter>
+                <action android:name="android.service.carrier.CarrierService"/>
+            </intent-filter>
+        </service>
+
+        <receiver
+                android:name=".receiver.BootReceiver"
+                android:enabled="true"
+                android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
 
         <provider
                 android:name="rikka.shizuku.ShizukuProvider"

@@ -1,0 +1,60 @@
+name: Build Android APK
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Install the real API 36 platform first: AGP needs `core-for-system-modules.jar` from it,
+      # which the hidden-API jar below does not provide.
+      - name: Install platform 36
+        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+
+      # Nrfr calls hidden telephony interfaces (ICarrierConfigLoader, ITelephony), so it must be
+      # compiled against an android.jar that still exposes them.
+      - name: Swap in hidden-API android.jar
+        run: |
+          curl -fsSL \
+            https://raw.githubusercontent.com/Reginer/aosp-android-jar/main/android-36/android.jar \
+            -o "$ANDROID_HOME/platforms/android-36/android.jar"
+
+      - name: Unit tests
+        run: |
+          gradle wrapper --gradle-version 8.13
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest --stacktrace
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nrfr-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests/
+          if-no-files-found: ignore

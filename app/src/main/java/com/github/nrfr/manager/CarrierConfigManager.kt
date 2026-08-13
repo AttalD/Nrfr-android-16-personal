@@ -3,120 +3,283 @@ package com.github.nrfr.manager
 import android.content.Context
 import android.os.Build
 import android.os.PersistableBundle
-import android.telephony.CarrierConfigManager
 import android.telephony.SubscriptionManager
-import android.telephony.TelephonyFrameworkInitializer
 import android.telephony.TelephonyManager
-import com.android.internal.telephony.ICarrierConfigLoader
+import android.util.Log
+import com.github.nrfr.data.OverrideStore
 import com.github.nrfr.model.SimCardInfo
-import rikka.shizuku.ShizukuBinderWrapper
+import com.github.nrfr.service.NrfrCarrierService
 
+/** 生效方式。 */
+enum class Strategy {
+    /**
+     * `ICarrierConfigLoader.overrideConfig` — Nrfr 的原始方案。
+     * Works up to the 2025-09 security patch level; blocked for the shell UID after that.
+     */
+    LEGACY_OVERRIDE,
+
+    /**
+     * 把本应用注册为该 SIM 的 CarrierService，由系统主动向我们索取配置。
+     * The supported extension point, and the only non-root route left on Android 16.
+     */
+    CARRIER_SERVICE
+}
+
+sealed class ApplyResult {
+    data class Success(val strategy: Strategy, val note: String? = null) : ApplyResult()
+    data class Failure(val kind: FailureKind, val detail: String?) : ApplyResult() {
+        val message: String get() = TelephonyFailures.describe(kind) + (detail?.let { "\n($it)" } ?: "")
+    }
+}
+
+/**
+ * Nrfr 的核心：在不同 Android 版本上以合适的机制覆盖 SIM 的国家码/运营商名。
+ *
+ * ## Why there are two strategies
+ *
+ * The original implementation called `ICarrierConfigLoader.overrideConfig()` over Binder while
+ * running as the shell UID (courtesy of Shizuku). AOSP commit `1ac1e79d1` "Protect shell
+ * overriding the carrier config" (bug 441823943, shipped in the 2025-10 security patch, tracked as
+ * CVE-2025-48617) added `CarrierConfigLoader.secureOverrideConfig`, which starts with:
+ *
+ * ```java
+ * if (TelephonyPermissions.isShell(getCallingUid())) {
+ *     throw new SecurityException("overrideConfig cannot be invoked by shell");
+ * }
+ * ```
+ *
+ * A companion commit (`c8123b01b`) additionally refuses `persistent=true` unless the caller is a
+ * system app on a user build. Both apply to Android 16 / OxygenOS 16, so the legacy path is
+ * simply unavailable there — there is nothing to "work around" inside `overrideConfig` itself.
+ *
+ * [Strategy.CARRIER_SERVICE] therefore stops trying to push config in from outside and instead
+ * becomes the component the framework *pulls* config from:
+ *
+ *  1. `ITelephony.setCarrierTestOverride(subId, …, carrierPrivilegeRules = <our cert SHA-256>, …)`
+ *     grants this package carrier privileges for the subscription. It is guarded by
+ *     `enforceModifyPermission()` only — shell holds MODIFY_PHONE_STATE and the CVE fix does not
+ *     touch it.
+ *  2. `ITelephony.setCarrierServicePackageOverride(subId, <us>, …)` pins us as the carrier service.
+ *     It is guarded by `TelephonyPermissions.enforceShellOnly`, i.e. it *requires* the shell UID —
+ *     exactly what Shizuku provides.
+ *  3. The framework binds [NrfrCarrierService] and calls `onLoadConfig`, and
+ *     `UiccProfile.handleSimCountryIsoOverride` applies the country ISO we return.
+ */
 object CarrierConfigManager {
+
+    private const val TAG = "Nrfr/Manager"
+
+    /** Cached result of probing the legacy path, so we do not retry a known-blocked call. */
+    @Volatile
+    private var legacyBlocked: Boolean? = null
+
+    // ------------------------------------------------------------------ read
+
     fun getSimCards(context: Context): List<SimCardInfo> {
         val simCards = mutableListOf<SimCardInfo>()
-        val subId1 = SubscriptionManager.getSubId(0)
-        val subId2 = SubscriptionManager.getSubId(1)
-
-        if (subId1 != null) {
-            val config1 = getCurrentConfig(subId1[0])
-            simCards.add(SimCardInfo(1, subId1[0], getCarrierNameBySubId(context, subId1[0]), config1))
+        for (slot in 0..1) {
+            @Suppress("DEPRECATION")
+            val subIds = runCatching { SubscriptionManager.getSubId(slot) }.getOrNull() ?: continue
+            val subId = subIds.firstOrNull() ?: continue
+            if (!SubscriptionManager.isValidSubscriptionId(subId)) continue
+            simCards.add(
+                SimCardInfo(
+                    slot = slot + 1,
+                    subId = subId,
+                    carrierName = carrierNameFor(context, subId),
+                    currentConfig = describeCurrent(context, subId)
+                )
+            )
         }
-        if (subId2 != null) {
-            val config2 = getCurrentConfig(subId2[0])
-            simCards.add(SimCardInfo(2, subId2[0], getCarrierNameBySubId(context, subId2[0]), config2))
-        }
-
         return simCards
     }
 
-    private fun getCurrentConfig(subId: Int): Map<String, String> {
-        try {
-            val carrierConfigLoader = ICarrierConfigLoader.Stub.asInterface(
-                ShizukuBinderWrapper(
-                    TelephonyFrameworkInitializer
-                        .getTelephonyServiceManager()
-                        .carrierConfigServiceRegisterer
-                        .get()
-                )
-            )
-            val config = carrierConfigLoader.getConfigForSubId(subId, "com.github.nrfr") ?: return emptyMap()
+    /**
+     * What is actually in effect right now. Prefers the framework's own view, and falls back to
+     * whatever we persisted if the privileged read is unavailable.
+     */
+    private fun describeCurrent(context: Context, subId: Int): Map<String, String> {
+        val live = runCatching {
+            val config = PrivilegedTelephony.currentConfig(subId, context.packageName)
+            config?.let { CarrierConfigKeys.toSpec(it.toValueMap()) }
+        }.getOrNull()
 
-            val result = mutableMapOf<String, String>()
+        val stored = runCatching { OverrideStore.get(context, subId) }.getOrDefault(OverrideSpec())
+        val effective = when {
+            live != null && !live.isEmpty -> live.copy(simOperatorNumeric = stored.simOperatorNumeric)
+            else -> stored
+        }
+        return effective.describe()
+    }
 
-            // 获取国家码配置
-            config.getString(CarrierConfigManager.KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING)?.let {
-                result["国家码"] = it
+    private fun PersistableBundle.toValueMap(): Map<String, Any?> =
+        keySet().associateWith { @Suppress("DEPRECATION") get(it) }
+
+    private fun carrierNameFor(context: Context, subId: Int): String {
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+            ?: return ""
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                tm.createForSubscriptionId(subId).networkOperatorName
+            } else {
+                @Suppress("DEPRECATION")
+                tm.networkOperatorName
             }
+        }.getOrElse { runCatching { tm.networkOperatorName }.getOrDefault("") }
+    }
 
-            // 获取运营商名称配置
-            if (config.getBoolean(CarrierConfigManager.KEY_CARRIER_NAME_OVERRIDE_BOOL, false)) {
-                config.getString(CarrierConfigManager.KEY_CARRIER_NAME_STRING)?.let {
-                    result["运营商名称"] = it
+    // ----------------------------------------------------------------- write
+
+    fun setCarrierConfig(
+        context: Context,
+        subId: Int,
+        countryCode: String?,
+        carrierName: String?,
+        simOperatorNumeric: String? = null
+    ): ApplyResult = apply(
+        context,
+        subId,
+        OverrideSpec.of(countryCode, carrierName, simOperatorNumeric)
+    )
+
+    fun apply(context: Context, subId: Int, spec: OverrideSpec): ApplyResult {
+        if (spec.isEmpty) return revert(context, subId)
+
+        // Persist first: the framework may call back into NrfrCarrierService as soon as we
+        // register, and the store is what that callback reads.
+        OverrideStore.put(context, subId, spec)
+
+        if (legacyBlocked != true) {
+            when (val r = tryLegacy(subId, spec)) {
+                is ApplyResult.Success -> {
+                    legacyBlocked = false
+                    return r
+                }
+
+                is ApplyResult.Failure -> {
+                    if (!r.kind.shouldFallBackToCarrierService) {
+                        OverrideStore.clear(context, subId)
+                        return r
+                    }
+                    legacyBlocked = true
+                    Log.i(TAG, "legacy overrideConfig unavailable (${r.kind}); using CarrierService")
                 }
             }
-
-            return result
-        } catch (e: Exception) {
-            return emptyMap()
         }
+
+        val r = tryCarrierService(context, subId, spec)
+        if (r is ApplyResult.Failure) OverrideStore.clear(context, subId)
+        return r
     }
 
-    private fun getCarrierNameBySubId(context: Context, subId: Int): String {
-        val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-            ?: return ""
-
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                // Android 10 及以上使用新 API
-                telephonyManager.getNetworkOperatorName(subId)
-            } else {
-                // Android 8-9 使用反射获取运营商名称
-                val createForSubscriptionId = TelephonyManager::class.java.getMethod(
-                    "createForSubscriptionId",
-                    Int::class.javaPrimitiveType
-                )
-                val subTelephonyManager = createForSubscriptionId.invoke(telephonyManager, subId) as TelephonyManager
-                subTelephonyManager.networkOperatorName
-            }
-        } catch (e: Exception) {
-            // 如果获取失败，回退到默认的 TelephonyManager
-            telephonyManager.networkOperatorName
-        }
+    private fun tryLegacy(subId: Int, spec: OverrideSpec): ApplyResult = runCatching {
+        PrivilegedTelephony.overrideConfig(subId, NrfrCarrierService.toBundle(spec), true)
+        ApplyResult.Success(Strategy.LEGACY_OVERRIDE)
+    }.getOrElse { t ->
+        Log.w(TAG, "legacy overrideConfig failed", t)
+        ApplyResult.Failure(TelephonyFailures.classify(t), t.message)
     }
 
-    fun setCarrierConfig(subId: Int, countryCode: String?, carrierName: String? = null) {
-        val bundle = PersistableBundle()
-
-        // 设置国家码
-        if (!countryCode.isNullOrEmpty() && countryCode.length == 2) {
-            bundle.putString(
-                CarrierConfigManager.KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING,
-                countryCode.lowercase()
+    private fun tryCarrierService(context: Context, subId: Int, spec: OverrideSpec): ApplyResult {
+        val certs = PrivilegedTelephony.ownCertSha256(context)
+        if (certs.isEmpty()) {
+            return ApplyResult.Failure(
+                FailureKind.MISSING_API,
+                "无法读取本应用的签名证书哈希"
             )
         }
 
-        // 设置运营商名称
-        if (!carrierName.isNullOrEmpty()) {
-            bundle.putBoolean(CarrierConfigManager.KEY_CARRIER_NAME_OVERRIDE_BOOL, true)
-            bundle.putString(CarrierConfigManager.KEY_CARRIER_NAME_STRING, carrierName)
-        }
+        // Read the SIM's real identity *before* touching anything, so we can hand it straight back
+        // to setCarrierTestOverride and leave gsm.sim.operator.* untouched.
+        val realMccMnc = PrivilegedTelephony.realMccMnc(context, subId)
+        val realSpn = PrivilegedTelephony.realSpn(context, subId)
+        val mccMnc = spec.simOperatorNumeric ?: realMccMnc
 
-        overrideCarrierConfig(subId, bundle)
-    }
-
-    fun resetCarrierConfig(subId: Int) {
-        overrideCarrierConfig(subId, null)
-    }
-
-    private fun overrideCarrierConfig(subId: Int, bundle: PersistableBundle?) {
-        val carrierConfigLoader = ICarrierConfigLoader.Stub.asInterface(
-            ShizukuBinderWrapper(
-                TelephonyFrameworkInitializer
-                    .getTelephonyServiceManager()
-                    .carrierConfigServiceRegisterer
-                    .get()
+        return runCatching {
+            PrivilegedTelephony.applyCarrierPrivileges(
+                subId = subId,
+                certSha256Hex = certs.first(),
+                realMccMnc = mccMnc,
+                realSpn = spec.carrierName ?: realSpn
             )
-        )
-        carrierConfigLoader.overrideConfig(subId, bundle, true)
+            PrivilegedTelephony.setCarrierServicePackageOverride(
+                subId = subId,
+                carrierServicePackage = context.packageName,
+                callingPackage = context.packageName
+            )
+            runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
+                .onFailure { Log.w(TAG, "notifyConfigChanged failed (non-fatal)", it) }
+
+            ApplyResult.Success(
+                Strategy.CARRIER_SERVICE,
+                note = "已通过 CarrierService 生效" +
+                        if (spec.simOperatorNumeric != null) "（含 MCC/MNC 伪装）" else ""
+            )
+        }.getOrElse { t ->
+            Log.e(TAG, "CarrierService strategy failed", t)
+            ApplyResult.Failure(TelephonyFailures.classify(t), t.message)
+        }
     }
+
+    // ---------------------------------------------------------------- revert
+
+    fun resetCarrierConfig(context: Context, subId: Int): ApplyResult = revert(context, subId)
+
+    /**
+     * Undoes everything this app did for [subId]. Safe to call even if nothing was applied.
+     *
+     * Note the residual state: `IccRecords`' "test mode" flag stays set until the SIM is
+     * re-initialised (reboot or SIM re-insert). That is inert on its own — every
+     * `CarrierTestOverride` getter falls back to the real SIM value when its override is null,
+     * and we restore the real MCC/MNC and SPN explicitly here.
+     */
+    fun revert(context: Context, subId: Int): ApplyResult {
+        // Clear the store first: if the framework calls NrfrCarrierService while we unwind, it
+        // must get an empty bundle rather than the old override.
+        val previous = runCatching { OverrideStore.get(context, subId) }.getOrDefault(OverrideSpec())
+        OverrideStore.clear(context, subId)
+
+        val errors = mutableListOf<String>()
+
+        runCatching {
+            PrivilegedTelephony.setCarrierServicePackageOverride(subId, null, context.packageName)
+        }.onFailure { errors += "carrierServiceOverride: ${it.message}" }
+
+        // Restore the SIM's own operator numeric / name, undoing any spoof.
+        val realMccMnc = PrivilegedTelephony.realMccMnc(context, subId)
+        val realSpn = PrivilegedTelephony.realSpn(context, subId)
+        runCatching {
+            PrivilegedTelephony.clearCarrierPrivileges(subId, realMccMnc, realSpn)
+        }.onFailure { errors += "carrierPrivileges: ${it.message}" }
+
+        // Also drop any legacy override that an older Android may still be holding.
+        runCatching { PrivilegedTelephony.overrideConfig(subId, null, true) }
+            .onFailure { Log.d(TAG, "legacy reset skipped: ${it.message}") }
+
+        runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
+            .onFailure { errors += "notifyConfigChanged: ${it.message}" }
+
+        return if (errors.isEmpty()) {
+            ApplyResult.Success(
+                strategy = if (legacyBlocked == false) Strategy.LEGACY_OVERRIDE else Strategy.CARRIER_SERVICE,
+                note = if (previous.isEmpty) "无需还原" else "已还原"
+            )
+        } else {
+            ApplyResult.Failure(FailureKind.UNKNOWN, errors.joinToString("; "))
+        }
+    }
+
+    // -------------------------------------------------------- boot re-apply
+
+    /**
+     * Re-applies persisted overrides, e.g. after a reboot.
+     *
+     * Both privileged calls this depends on are in-memory framework state that does not survive a
+     * reboot, and Shizuku itself must be running again first — so this is best-effort and is
+     * driven from the app/boot receiver rather than assumed to be automatic.
+     */
+    fun reapplyAll(context: Context): Map<Int, ApplyResult> =
+        OverrideStore.configuredSubIds(context).associateWith { subId ->
+            apply(context, subId, OverrideStore.get(context, subId))
+        }
 }

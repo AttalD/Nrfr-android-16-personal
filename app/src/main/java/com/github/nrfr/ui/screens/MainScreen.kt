@@ -19,7 +19,9 @@ import androidx.compose.ui.unit.dp
 import com.github.nrfr.R
 import com.github.nrfr.data.CountryPresets
 import com.github.nrfr.data.PresetCarriers
+import com.github.nrfr.manager.ApplyResult
 import com.github.nrfr.manager.CarrierConfigManager
+import com.github.nrfr.manager.Strategy
 import com.github.nrfr.model.SimCardInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,6 +38,9 @@ fun MainScreen(onShowAbout: () -> Unit) {
     var isCountryCodeMenuExpanded by remember { mutableStateOf(false) }
     var isCarrierMenuExpanded by remember { mutableStateOf(false) }
     var refreshTrigger by remember { mutableStateOf(0) }
+    var spoofMccMnc by remember { mutableStateOf(false) }
+    var customMccMnc by remember { mutableStateOf("") }
+    var lastResult by remember { mutableStateOf<ApplyResult?>(null) }
 
     // 获取实际的 SIM 卡信息
     val simCards = remember(context, refreshTrigger) { CarrierConfigManager.getSimCards(context) }
@@ -145,6 +150,18 @@ fun MainScreen(onShowAbout: () -> Unit) {
                 )
             }
 
+            // 进阶：伪装 SIM 运营商代码 (MCC/MNC)
+            AdvancedMccMncOption(
+                enabled = spoofMccMnc,
+                onEnabledChange = { spoofMccMnc = it },
+                value = customMccMnc,
+                onValueChange = { input ->
+                    if (input.length <= 6 && input.all { it.isDigit() }) customMccMnc = input
+                }
+            )
+
+            lastResult?.let { ResultBanner(it) }
+
             Spacer(modifier = Modifier.weight(1f))
 
             // 按钮行
@@ -155,40 +172,38 @@ fun MainScreen(onShowAbout: () -> Unit) {
                 customCountryCode = customCountryCode,
                 selectedCarrier = selectedCarrier,
                 customCarrierName = customCarrierName,
-                onReset = {
-                    try {
-                        CarrierConfigManager.resetCarrierConfig(it.subId)
-                        Toast.makeText(context, "设置已还原", Toast.LENGTH_SHORT).show()
-                        refreshTrigger += 1
-                        selectedCountryCode = ""
-                        selectedCarrier = null
-                        customCarrierName = ""
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "还原失败: ${e.message}", Toast.LENGTH_SHORT).show()
-                    }
+                onReset = { simCard ->
+                    val result = CarrierConfigManager.resetCarrierConfig(context, simCard.subId)
+                    lastResult = result
+                    Toast.makeText(context, result.toToast("还原"), Toast.LENGTH_SHORT).show()
+                    refreshTrigger += 1
+                    selectedCountryCode = ""
+                    selectedCarrier = null
+                    customCarrierName = ""
+                    spoofMccMnc = false
+                    customMccMnc = ""
                 },
                 onSave = { simCard ->
-                    try {
-                        val carrierName = if (selectedCarrier?.name == "自定义") {
-                            customCarrierName.takeIf { it.isNotEmpty() }
-                        } else {
-                            selectedCarrier?.displayName
-                        }
-                        val countryCode = if (isCustomCountryCode) {
-                            customCountryCode.takeIf { it.length == 2 }
-                        } else {
-                            selectedCountryCode
-                        }
-                        CarrierConfigManager.setCarrierConfig(
-                            simCard.subId,
-                            countryCode,
-                            carrierName
-                        )
-                        Toast.makeText(context, "设置已保存", Toast.LENGTH_SHORT).show()
-                        refreshTrigger += 1
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "保存失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                    val carrierName = if (selectedCarrier?.name == "自定义") {
+                        customCarrierName.takeIf { it.isNotEmpty() }
+                    } else {
+                        selectedCarrier?.displayName
                     }
+                    val countryCode = if (isCustomCountryCode) {
+                        customCountryCode.takeIf { it.length == 2 }
+                    } else {
+                        selectedCountryCode
+                    }
+                    val result = CarrierConfigManager.setCarrierConfig(
+                        context = context,
+                        subId = simCard.subId,
+                        countryCode = countryCode,
+                        carrierName = carrierName,
+                        simOperatorNumeric = customMccMnc.takeIf { spoofMccMnc }
+                    )
+                    lastResult = result
+                    Toast.makeText(context, result.toToast("保存"), Toast.LENGTH_LONG).show()
+                    refreshTrigger += 1
                 }
             )
         }
@@ -450,6 +465,86 @@ private fun CustomCarrierNameInput(
         label = { Text("自定义运营商名称") },
         modifier = Modifier.fillMaxWidth()
     )
+}
+
+/**
+ * 进阶选项：连同 MCC/MNC 一起伪装。
+ *
+ * This writes `gsm.sim.operator.numeric`, i.e. what `TelephonyManager.getSimOperator()` reports.
+ * It is a stronger signal than the country ISO alone, but the framework also matches APNs against
+ * that value, so a wrong MCC/MNC can cost mobile data. Off by default, and undone by "还原设置".
+ */
+@Composable
+private fun AdvancedMccMncOption(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    value: String,
+    onValueChange: (String) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Checkbox(checked = enabled, onCheckedChange = onEnabledChange)
+            Column(modifier = Modifier.weight(1f)) {
+                Text("同时伪装 SIM 运营商代码 (MCC/MNC)", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    "进阶选项：效果更强，但可能影响 APN 匹配导致移动数据异常。如遇问题请点击「还原设置」。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        if (enabled) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = { Text("MCC+MNC (5-6 位数字，如 44010)") },
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done
+                ),
+                singleLine = true,
+                isError = value.isNotEmpty() && value.length < 5,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}
+
+/** 显示上一次操作的结果，包含实际使用的生效方式。 */
+@Composable
+private fun ResultBanner(result: ApplyResult) {
+    val (text, color) = when (result) {
+        is ApplyResult.Success -> {
+            val how = when (result.strategy) {
+                Strategy.CARRIER_SERVICE -> "CarrierService（Android 16 方案）"
+                Strategy.LEGACY_OVERRIDE -> "overrideConfig（传统方案）"
+            }
+            "成功 · 生效方式：$how${result.note?.let { "\n$it" } ?: ""}" to
+                    MaterialTheme.colorScheme.secondaryContainer
+        }
+
+        is ApplyResult.Failure -> "失败 · ${result.message}" to MaterialTheme.colorScheme.errorContainer
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = color)
+    ) {
+        Text(text, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private fun ApplyResult.toToast(action: String): String = when (this) {
+    is ApplyResult.Success -> "$action 成功"
+    is ApplyResult.Failure -> "$action 失败: ${TelephonyFailuresShim.short(this)}"
+}
+
+/** Keeps the toast short; the full explanation lives in [ResultBanner]. */
+private object TelephonyFailuresShim {
+    fun short(failure: ApplyResult.Failure): String =
+        failure.message.lineSequence().firstOrNull().orEmpty()
 }
 
 @Composable

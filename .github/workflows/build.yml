@@ -74,11 +74,15 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      # 下载替换 android.jar
+      # 安装 API 36 平台（AGP 需要其中的 core-for-system-modules.jar）
+      - name: Install platform 36
+        run: sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+        shell: bash
+
+      # 下载替换 android.jar（保留隐藏 API：ICarrierConfigLoader / ITelephony）
       - name: Download android.jar
         run: |
-          mkdir -p $ANDROID_HOME/platforms/android-34
-          curl -L https://raw.githubusercontent.com/Reginer/aosp-android-jar/refs/heads/main/android-34/android.jar -o $ANDROID_HOME/platforms/android-34/android.jar
+          curl -fsSL https://raw.githubusercontent.com/Reginer/aosp-android-jar/refs/heads/main/android-36/android.jar -o $ANDROID_HOME/platforms/android-36/android.jar
         shell: bash
 
       # 构建 Android APK

@@ -9,6 +9,9 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.github.nrfr.data.OverrideStore
+import com.github.nrfr.manager.ApplyResult
+import com.github.nrfr.manager.CarrierConfigManager
 import com.github.nrfr.ui.screens.AboutScreen
 import com.github.nrfr.ui.screens.MainScreen
 import com.github.nrfr.ui.screens.ShizukuNotReadyScreen
@@ -19,6 +22,7 @@ import rikka.shizuku.Shizuku
 class MainActivity : ComponentActivity() {
     private var isShizukuReady by mutableStateOf(false)
     private var showAbout by mutableStateOf(false)
+    private var reapplyDone = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,6 +71,28 @@ class MainActivity : ComponentActivity() {
                 Shizuku.requestPermission(0)
             }
             hasPermission
+        }
+        if (isShizukuReady) reapplyAfterReboot()
+    }
+
+    /**
+     * 开机后重新应用已保存的配置。
+     *
+     * `setCarrierTestOverride` / `setCarrierServicePackageOverride` are in-memory framework state,
+     * so a reboot drops them. `BootReceiver` retries first, but on a non-rooted device Shizuku is
+     * not running that early — the reliable moment is the first time the user opens Nrfr with
+     * Shizuku granted, which is here.
+     */
+    private fun reapplyAfterReboot() {
+        if (reapplyDone) return
+        reapplyDone = true
+        if (OverrideStore.configuredSubIds(this).isEmpty()) return
+        val results = runCatching { CarrierConfigManager.reapplyAll(this) }.getOrNull().orEmpty()
+        val failed = results.values.filterIsInstance<ApplyResult.Failure>()
+        if (results.isNotEmpty() && failed.isEmpty()) {
+            Toast.makeText(this, "已重新应用保存的配置", Toast.LENGTH_SHORT).show()
+        } else if (failed.isNotEmpty()) {
+            Toast.makeText(this, "重新应用失败: ${failed.first().message}", Toast.LENGTH_LONG).show()
         }
     }
 
