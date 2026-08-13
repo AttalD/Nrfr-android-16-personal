@@ -10,6 +10,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Fail fast instead of burning the default 6h if a compiler daemon wedges.
+    timeout-minutes: 40
+    env:
+      # Out-of-process Kotlin/Gradle daemons are a known source of indefinite hangs on hosted
+      # runners; a CI build is single-shot so there is nothing to gain from keeping them warm.
+      GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g
+      KOTLIN_OPTS: -Dkotlin.compiler.execution.strategy=in-process
     steps:
       - uses: actions/checkout@v4
 
@@ -38,12 +45,17 @@ jobs:
       # The committed wrapper pins Gradle 8.13. The runner's system Gradle is 9.x, which AGP 8.x
       # cannot run under, so never invoke `gradle` directly here.
       - name: Unit tests
+        timeout-minutes: 20
         run: |
           chmod +x ./gradlew
-          ./gradlew testDebugUnitTest --stacktrace
+          ./gradlew testDebugUnitTest --no-daemon --stacktrace \
+            -Dkotlin.compiler.execution.strategy=in-process
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        timeout-minutes: 20
+        run: |
+          ./gradlew assembleDebug --no-daemon --stacktrace \
+            -Dkotlin.compiler.execution.strategy=in-process
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
