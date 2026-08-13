@@ -52,6 +52,14 @@ class NrfrCarrierService : CarrierService() {
             }
         }
 
+        // Country-only experiment: exactly one key, nothing else — no carrier name, no MCC/MNC.
+        CarrierServiceBridge.experimentCountryIso?.let { iso ->
+            Log.i(TAG, "onLoadConfig(subId=$subscriptionId) -> EXPERIMENT country=$iso")
+            return PersistableBundle().apply {
+                putString(CarrierConfigKeys.KEY_SIM_COUNTRY_ISO, iso)
+            }
+        }
+
         val spec = runCatching { OverrideStore.get(this, subscriptionId) }
             .getOrElse {
                 Log.e(TAG, "failed to read override store for subId=$subscriptionId", it)

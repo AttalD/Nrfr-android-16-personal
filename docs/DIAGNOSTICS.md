@@ -213,6 +213,40 @@ network_operator, network_operator_name, network_country_iso, network_roaming
 在探测前后都可读，于是它成为一个**真正可比较**的字段而非权限伪影；
 若用户拒绝授权，则退化为 `NOT_COMPARABLE`，同样不会被误判为变更。
 
+### 4.6 「只改 SIM 国家码」实验（Step 7）
+
+哨兵探测只证明了框架会**搬运**我们的 bundle，**没有**证明它会**响应**
+`KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING` 这个具体的键。AOSP 里是
+`UiccProfile.handleSimCountryIsoOverride()` 把它写进 `gsm.sim.operator.iso-country`，
+但 OEM 完全可能合并了这个键却从不走那条路径。
+
+因此这个实验把两件事严格分开：
+
+| 判定 | 含义 |
+| --- | --- |
+| **A** | 该键出现在合并后的 CarrierConfig 中（配置被接受） |
+| **B** | `getSimCountryIso()` 真的从 `cn` 变成了 `us`（配置真的生效） |
+| **C** | `getNetworkCountryIso()` 保持 `cn` |
+| **D** | SIM MCC/MNC 保持 `46000` |
+
+结论分为四类：
+
+| 结论 | 含义 |
+| --- | --- |
+| `CONFIG_REJECTED` | A 失败：键根本没进配置 |
+| `CONFIG_ACCEPTED_NO_EFFECT` | A 成功、B 失败：**本 ROM 不响应这个键** |
+| `EFFECTIVE` | A、B 均成功 |
+| `NOT_RUN` | 未执行 |
+
+`CONFIG_ACCEPTED_NO_EFFECT` 是需要如实报告的结果 —— 出现它就说明这条路在本机走不通，
+**不会**再自动去试别的机制。
+
+实验只下发**一个键**。`setCarrierTestOverride` 仍然回填 SIM 的真实 MCC/MNC 与 SPN，
+因此 `gsm.sim.operator.numeric` / `.alpha` 保持不变。除 `sim_country_iso` 外，
+任何身份键发生变化都会被记为**意外副作用**并导致实验判定为不干净。
+
+还原同样在 `finally` 中无条件执行，并会再次逐项对比以确认国家码已回到 `cn`。
+
 ### 会自动拒绝执行的情况
 
 若 `getCarrierServicePackageNameForLogicalSlot()` 返回了**别的**包名，探测按钮直接禁用。

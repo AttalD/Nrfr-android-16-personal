@@ -23,6 +23,15 @@ object CarrierServiceBridge {
     @Volatile
     var probeToken: String? = null
 
+    /**
+     * 「只改国家码」实验模式：服务只下发 `KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING`，别的一律不发。
+     *
+     * Deliberately separate from the normal [com.github.nrfr.data.OverrideStore] path so the
+     * experiment cannot accidentally carry a carrier-name override or anything else along with it.
+     */
+    @Volatile
+    var experimentCountryIso: String? = null
+
     private val invocations = AtomicInteger(0)
 
     @Volatile
@@ -38,6 +47,7 @@ object CarrierServiceBridge {
 
     fun reset() {
         probeToken = null
+        experimentCountryIso = null
         lastSubId = -1
         invocations.set(0)
     }

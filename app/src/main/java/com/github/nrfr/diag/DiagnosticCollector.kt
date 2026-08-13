@@ -47,6 +47,21 @@ object DiagnosticCollector {
         )
     }
 
+    /**
+     * Every value, for the before/during/after comparison around the country-override experiment.
+     *
+     * Wider than [collectIdentity] on purpose: the experiment must also prove APN, data state and
+     * network type were untouched, and those are framework values rather than identity ones.
+     */
+    fun collectAll(context: Context, subId: Int): List<DiagnosticValue> {
+        val tm = (context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
+            .let { runCatching { it.createForSubscriptionId(subId) }.getOrDefault(it) }
+        return simValues(tm) +
+                networkValues(tm) +
+                frameworkValues(context, tm, subId) +
+                carrierConfigValues(context, subId)
+    }
+
     /** Only the identity values, used for the before/after comparison around a probe. */
     fun collectIdentity(context: Context, subId: Int): List<DiagnosticValue> {
         val tm = (context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)

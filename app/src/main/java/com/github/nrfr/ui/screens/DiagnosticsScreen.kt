@@ -48,6 +48,9 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var busyLabel by remember { mutableStateOf("") }
     var confirmProbe by remember { mutableStateOf(false) }
+    var confirmExperiment by remember { mutableStateOf(false) }
+    var experimentCountry by remember { mutableStateOf(CountryOverrideExperiment.DEFAULT_TEST_COUNTRY) }
+    var experiment by remember { mutableStateOf<CountryOverrideResult?>(null) }
 
     fun collect(sim: SimCardInfo) {
         scope.launch {
@@ -134,9 +137,24 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                     onRun = { confirmProbe = true }
                 )
 
+                CountryExperimentCard(
+                    report = r,
+                    result = experiment,
+                    country = experimentCountry,
+                    onCountryChange = { input ->
+                        if (input.length <= 2 && input.all { it.isLetter() }) {
+                            experimentCountry = input.lowercase()
+                        }
+                    },
+                    enabled = !busy,
+                    onRun = { confirmExperiment = true }
+                )
+
                 OutlinedButton(
                     onClick = {
-                        copyToClipboard(context, ReportFormatter.format(r))
+                        val text = ReportFormatter.format(r) +
+                                (experiment?.let { "\n" + ReportFormatter.formatCountryExperiment(it) } ?: "")
+                        copyToClipboard(context, text)
                         Toast.makeText(context, "报告已复制到剪贴板", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.fillMaxWidth()
@@ -185,6 +203,140 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
             }
         )
     }
+
+    if (confirmExperiment) {
+        val r = report
+        AlertDialog(
+            onDismissRequest = { confirmExperiment = false },
+            title = { Text("运行 SIM 国家码实验（$experimentCountry）？") },
+            text = {
+                Text(
+                    "这会短暂地把 SIM 国家码覆盖为「$experimentCountry」，用来验证\n" +
+                            "KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING 在本机是否真的生效。\n\n" +
+                            "只下发这一个键。不会修改：\n" +
+                            "• SIM / 网络 MCC/MNC（仍为 46000）\n" +
+                            "• 网络国家码（仍为 cn）\n" +
+                            "• Carrier ID、APN、漫游状态\n" +
+                            "• 物理 SIM 卡\n\n" +
+                            "结束后自动还原，并逐项对比实验前后的值。\n" +
+                            "若出现异常，请到主界面点击「还原设置」。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmExperiment = false
+                    val sim = selected ?: return@TextButton
+                    scope.launch {
+                        busy = true; busyLabel = "正在运行国家码实验（约 20-40 秒）…"
+                        val res = withContext(Dispatchers.IO) {
+                            CountryOverrideExperiment.run(
+                                context, sim.slot - 1, sim.subId, experimentCountry
+                            )
+                        }
+                        experiment = res
+                        report = withContext(Dispatchers.IO) {
+                            DiagnosticCollector.collect(context, sim.slot - 1, sim.subId)
+                                .copy(probe = report?.probe)
+                        }
+                        busy = false
+                    }
+                }, enabled = r?.probeIsSafe == true) { Text("开始实验") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmExperiment = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+/**
+ * 「只改 SIM 国家码」实验。
+ *
+ * Reports A/B/C/D as four independent lines, because "the config was accepted" and "the country
+ * actually changed" are genuinely different findings and conflating them would hide the exact
+ * thing this experiment exists to measure.
+ */
+@Composable
+private fun CountryExperimentCard(
+    report: DiagnosticReport,
+    result: CountryOverrideResult?,
+    country: String,
+    onCountryChange: (String) -> Unit,
+    enabled: Boolean,
+    onRun: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("SIM 国家码覆盖实验", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "只下发 KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING 一个键，验证 getSimCountryIso() 是否真的改变。" +
+                        "不改 MCC/MNC、不改网络、不改 APN，结束后自动还原。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = country,
+                onValueChange = onCountryChange,
+                label = { Text("测试国家码（2 位字母）") },
+                singleLine = true,
+                isError = country.length != 2,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            result?.let { r ->
+                Spacer(Modifier.height(8.dp))
+                r.steps.forEach { s ->
+                    Text(
+                        "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { "\n     $it" } ?: ""}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Verdict("A. CarrierConfig 接受该键", r.overrideAccepted)
+                Verdict(
+                    "B. getSimCountryIso() 改变 (${r.simCountryBefore ?: "?"} → ${r.simCountryDuring ?: "?"})",
+                    r.simCountryChanged && r.simCountryMatchesRequest
+                )
+                Verdict("C. 网络国家码保持不变", r.networkCountryHeld)
+                Verdict("D. SIM MCC/MNC 保持不变", r.simOperatorHeld)
+                Verdict("   Carrier ID 保持不变", r.carrierIdHeld)
+                Verdict("   APN 保持不变", r.apnHeld)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "结论：${r.verdict.label}",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (r.verdict == OverrideVerdict.EFFECTIVE)
+                        MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
+                Verdict("已自动还原（SIM 国家码现为 ${r.simCountryAfter ?: "?"}）", r.revertRestored)
+                if (r.unexpectedSideEffects.isNotEmpty()) {
+                    Text(
+                        "⚠️ 意外副作用：${r.unexpectedSideEffects.joinToString(", ") { it.key }}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            Button(
+                onClick = onRun,
+                enabled = enabled && report.probeIsSafe && country.length == 2,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (result == null) "运行国家码实验" else "重新运行") }
+        }
+    }
+}
+
+@Composable
+private fun Verdict(label: String, ok: Boolean) {
+    Text(
+        "${if (ok) "✅" else "❌"} $label",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (ok) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error
+    )
 }
 
 @Composable

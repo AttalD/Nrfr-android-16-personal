@@ -1,5 +1,7 @@
 package com.github.nrfr.diag
 
+import com.github.nrfr.manager.CarrierConfigKeys
+
 /**
  * 把 [DiagnosticReport] 渲染成可复制/分享的纯文本。
  *
@@ -129,6 +131,40 @@ object ReportFormatter {
                 isIdentity = key in IDENTITY_KEYS
             )
         }
+    }
+
+    /** 「只改国家码」实验的报告段落。 */
+    fun formatCountryExperiment(r: CountryOverrideResult): String = buildString {
+        appendLine("===== SIM 国家码覆盖实验（目标: ${r.requestedCountry}）=====")
+        for (s in r.steps) {
+            appendLine("${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}")
+        }
+        appendLine()
+        appendLine("A. CarrierConfig 是否接受该键: ${if (r.overrideAccepted) "是" else "否"}" +
+                " (${CarrierConfigKeys.KEY_SIM_COUNTRY_ISO} = ${r.configKeyValue ?: "未出现"})")
+        appendLine("B. getSimCountryIso() 是否改变: ${if (r.simCountryChanged) "是" else "否"}" +
+                " (${r.simCountryBefore ?: "?"} → ${r.simCountryDuring ?: "?"})")
+        appendLine("C. 网络国家码是否保持: ${if (r.networkCountryHeld) "是" else "否"}")
+        appendLine("D. SIM MCC/MNC 是否保持: ${if (r.simOperatorHeld) "是" else "否"}")
+        appendLine("   网络 MCC/MNC 是否保持: ${if (r.networkOperatorHeld) "是" else "否"}")
+        appendLine("   Carrier ID 是否保持: ${if (r.carrierIdHeld) "是" else "否"}")
+        appendLine("   APN 是否保持: ${if (r.apnHeld) "是" else "否"}")
+        appendLine("   漫游状态是否保持: ${if (r.roamingHeld) "是" else "否"}")
+        appendLine()
+        appendLine(">>> 结论: ${r.verdict.label}")
+        appendLine(">>> 还原: ${if (r.revertRestored) "已完全还原 ✅" else "存在未还原的值 ❌"}" +
+                " (SIM 国家码现为 ${r.simCountryAfter ?: "?"})")
+        if (r.unexpectedSideEffects.isNotEmpty()) {
+            appendLine("⚠️ 意外副作用:")
+            r.unexpectedSideEffects.forEach { appendLine("  ${describe(it)}") }
+        }
+        if (r.revertFailures.isNotEmpty()) {
+            appendLine("❌ 未还原的值:")
+            r.revertFailures.forEach { appendLine("  ${describe(it)}") }
+        }
+        appendLine()
+        appendLine("实验中逐项对比:")
+        r.comparisonsDuring.forEach { appendLine("  ${describe(it)}") }
     }
 
     /** 单行描述，用于报告与界面。 */
