@@ -106,3 +106,13 @@ data class TransactionResult(
 
     fun effect(signal: Signal): SignalEffect? = effects.firstOrNull { it.signal == signal }
 }
+
+
+/** 事务模式。 */
+enum class TransactionMode {
+    /** 验证用：结束时总是还原。 */
+    EXPERIMENT,
+
+    /** 生产用：成功则保持生效，失败才自动还原。 */
+    PERSIST
+}

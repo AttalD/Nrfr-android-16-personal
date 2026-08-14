@@ -24,8 +24,27 @@ data class OpenTransaction(
     val baselineOperatorName: String?,
     /** 事务开始前 CarrierConfig 中国家码键的状态；null = 原本不存在。 */
     val baselineConfigCountryKey: String?,
-    val startedAtMillis: Long
+    val startedAtMillis: Long,
+    /**
+     * 持久化 Profile 的生命周期状态；实验型事务始终为 [ProfileState.APPLYING]。
+     *
+     * Stored in the same record as the baseline so a crash can never leave the state and the
+     * values it describes in separate places.
+     */
+    val state: ProfileState = ProfileState.APPLYING,
+    /** 已应用的 profile（持久化模式需要它来判断"当前值是否仍与 profile 一致"）。 */
+    val appliedCountryIso: String? = null,
+    val appliedOperatorName: String? = null,
+    val appliedOperatorNumeric: String? = null
 ) {
+    /** 还原目标 —— 基线一经写入便不再变动。 */
+    fun profile(): RegionalProfile = RegionalProfile(
+        name = profileName,
+        countryIso = appliedCountryIso,
+        operatorName = appliedOperatorName,
+        operatorNumeric = appliedOperatorNumeric
+    )
+
     fun toJson(): String = JSONObject().apply {
         put("subId", subId)
         put("slot", slot)
@@ -35,6 +54,10 @@ data class OpenTransaction(
         putOpt("baselineOperatorName", baselineOperatorName)
         putOpt("baselineConfigCountryKey", baselineConfigCountryKey)
         put("startedAtMillis", startedAtMillis)
+        put("state", state.name)
+        putOpt("appliedCountryIso", appliedCountryIso)
+        putOpt("appliedOperatorName", appliedOperatorName)
+        putOpt("appliedOperatorNumeric", appliedOperatorNumeric)
     }.toString()
 
     companion object {
@@ -48,7 +71,12 @@ data class OpenTransaction(
                 baselineOperatorNumeric = o.optStringOrNull("baselineOperatorNumeric"),
                 baselineOperatorName = o.optStringOrNull("baselineOperatorName"),
                 baselineConfigCountryKey = o.optStringOrNull("baselineConfigCountryKey"),
-                startedAtMillis = o.optLong("startedAtMillis", 0L)
+                startedAtMillis = o.optLong("startedAtMillis", 0L),
+                state = runCatching { ProfileState.valueOf(o.optString("state")) }
+                    .getOrDefault(ProfileState.APPLYING),
+                appliedCountryIso = o.optStringOrNull("appliedCountryIso"),
+                appliedOperatorName = o.optStringOrNull("appliedOperatorName"),
+                appliedOperatorNumeric = o.optStringOrNull("appliedOperatorNumeric")
             )
         }.getOrNull()
 
@@ -73,6 +101,15 @@ object TransactionJournal {
      */
     fun open(context: Context, tx: OpenTransaction) {
         prefs(context).edit().putString("$KEY_OPEN${tx.subId}", tx.toJson()).commit()
+    }
+
+    /** 读取某个 subId 的日志记录。 */
+    fun read(context: Context, subId: Int): OpenTransaction? =
+        openTransactions(context).firstOrNull { it.subId == subId }
+
+    /** 只更新状态，**绝不触碰基线** —— 基线一经写入即不可变。 */
+    fun updateState(context: Context, subId: Int, state: ProfileState) {
+        read(context, subId)?.let { open(context, it.copy(state = state)) }
     }
 
     fun close(context: Context, subId: Int) {

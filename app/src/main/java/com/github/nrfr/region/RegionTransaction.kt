@@ -38,6 +38,14 @@ object RegionTransaction {
         slot: Int,
         subId: Int,
         profile: RegionalProfile,
+        /**
+         * 实验模式结束时**总是**清理；持久模式仅在失败时清理，成功则保持生效。
+         *
+         * The apply half and the cleanup half are identical in both modes — only whether cleanup
+         * runs on success differs. There is exactly one apply implementation and exactly one
+         * teardown implementation.
+         */
+        mode: TransactionMode = TransactionMode.EXPERIMENT,
         /** 提供当前时间，便于测试注入。 */
         nowMillis: Long = System.currentTimeMillis()
     ): TransactionResult {
@@ -108,6 +116,7 @@ object RegionTransaction {
         var registered = false
         var during: List<DiagnosticValue> = emptyList()
         var observations: List<String> = emptyList()
+        var applySucceeded = false
         var cleanup: CleanupReport
 
         try {
@@ -169,12 +178,47 @@ object RegionTransaction {
                 if (side.isEmpty()) "除预期信号外无变化"
                 else "意外变化: ${side.joinToString(", ") { it.key }}"
             )
+
+            // Persistent mode keeps the override only if everything verified AND data is healthy.
+            val dataHealthy = ApnDataSafety.awaitHealthy(context, subId) != DataHealth.DEGRADED
+            applySucceeded = effects.isNotEmpty() &&
+                    effects.all { it.outcome == SignalOutcome.EFFECTIVE } &&
+                    side.isEmpty() && dataHealthy
+            if (!dataHealthy) {
+                steps += ProbeStep(
+                    "数据连通性检查", false,
+                    "移动数据在稳定后仍不健康，将自动还原"
+                )
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "transaction failed", t)
             steps += ProbeStep("事务异常", false, describe(t))
         } finally {
-            // ---- 6-8. restore, release, verify — always ----------------------------
-            cleanup = Cleanup.run(
+            // ---- 6-8. restore, release, verify ------------------------------------
+            // Persistent mode: on success we deliberately KEEP the override live, and the journal
+            // stays open recording ACTIVE so a crash or reboot can still be reconciled.
+            val keepActive = mode == TransactionMode.PERSIST && applySucceeded && registered
+            cleanup = if (keepActive) {
+                TransactionJournal.open(
+                    context,
+                    journalEntry.copy(
+                        state = ProfileState.ACTIVE,
+                        appliedCountryIso = profile.countryIso,
+                        appliedOperatorName = profile.operatorName,
+                        appliedOperatorNumeric = profile.operatorNumeric
+                    )
+                )
+                steps += ProbeStep(
+                    "⑦ 保持生效（持久模式）", true,
+                    "Profile 已启用并保持；日志记录 ACTIVE，可跨进程/重启对账"
+                )
+                CleanupReport(
+                    identityRestored = true, carrierConfigRestored = true,
+                    carrierServiceReleased = true, carrierPrivilegesReleased = true,
+                    noUnexpectedChanges = true, apnDataIntact = true,
+                    notes = listOf("持久模式：按设计保持生效，未执行清理")
+                )
+            } else Cleanup.run(
                 context = context,
                 slot = slot,
                 subId = subId,
@@ -184,7 +228,9 @@ object RegionTransaction {
                 expectedChangeKeys = emptySet(), // after cleanup NOTHING may differ
                 steps = steps
             )
-            if (cleanup.complete) {
+            if (keepActive) {
+                // journal intentionally left open
+            } else if (cleanup.complete) {
                 TransactionJournal.close(context, subId)
                 steps += ProbeStep("⑩ 关闭事务日志", true, "清理已验证完整")
             } else {

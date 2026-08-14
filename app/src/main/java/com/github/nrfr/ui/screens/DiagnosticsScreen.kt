@@ -55,6 +55,23 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     var recoveryCountry by remember { mutableStateOf("cn") }
     var recoverySteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
     var releaseSteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
+    val productionProfile = remember { RegionalProfile.PRESETS.first { it.operatorNumeric == "310260" } }
+    var profileState by remember { mutableStateOf(ProfileState.INACTIVE) }
+    var profileSnapshot by remember { mutableStateOf<Map<String, String?>>(emptyMap()) }
+    var profileSteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
+    var confirmApply by remember { mutableStateOf(false) }
+
+    fun refreshProfile(sim: SimCardInfo) {
+        scope.launch {
+            val st = withContext(Dispatchers.IO) {
+                ProfileManager.reconcile(context, sim.slot - 1, sim.subId)
+            }
+            profileState = st
+            profileSnapshot = withContext(Dispatchers.IO) {
+                ProfileManager.snapshot(context, sim.subId)
+            }
+        }
+    }
     var pendingRecovery by remember { mutableStateOf(false) }
 
     fun collect(sim: SimCardInfo) {
@@ -82,7 +99,9 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
         }
     }
 
-    LaunchedEffect(selected) { selected?.let { collect(it) } }
+    LaunchedEffect(selected) {
+        selected?.let { collect(it); refreshProfile(it) }
+    }
 
     Scaffold(
         topBar = {
@@ -161,6 +180,33 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                         ) { Text("补完回滚") }
                     }
                 }
+            }
+
+            selected?.let { sim ->
+                RegionProfileCard(
+                    profile = productionProfile,
+                    state = profileState,
+                    snapshot = profileSnapshot,
+                    steps = profileSteps,
+                    busy = busy,
+                    onApply = { confirmApply = true },
+                    onRestore = {
+                        scope.launch {
+                            busy = true; busyLabel = "正在恢复原始 SIM…"
+                            val res = withContext(Dispatchers.IO) {
+                                ProfileManager.restore(context, sim.slot - 1, sim.subId)
+                            }
+                            profileSteps = res.steps
+                            profileState = res.state
+                            profileSnapshot = withContext(Dispatchers.IO) {
+                                ProfileManager.snapshot(context, sim.subId)
+                            }
+                            res.message?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
+                            busy = false
+                            collect(sim)
+                        }
+                    }
+                )
             }
 
             val r = report
@@ -251,6 +297,31 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(24.dp))
             }
         }
+    }
+
+    if (confirmApply) {
+        FirstApplyWarningDialog(
+            profile = productionProfile,
+            onConfirm = {
+                confirmApply = false
+                val sim = selected ?: return@FirstApplyWarningDialog
+                scope.launch {
+                    busy = true; busyLabel = "正在启用 ${productionProfile.name}…"
+                    val res = withContext(Dispatchers.IO) {
+                        ProfileManager.apply(context, sim.slot - 1, sim.subId, productionProfile)
+                    }
+                    profileSteps = res.steps
+                    profileState = res.state
+                    profileSnapshot = withContext(Dispatchers.IO) {
+                        ProfileManager.snapshot(context, sim.subId)
+                    }
+                    res.message?.let { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
+                    busy = false
+                    collect(sim)
+                }
+            },
+            onDismiss = { confirmApply = false }
+        )
     }
 
     if (confirmProbe) {
