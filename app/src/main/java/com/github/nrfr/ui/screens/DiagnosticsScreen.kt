@@ -8,7 +8,6 @@ import android.content.pm.PackageManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -21,19 +20,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.github.nrfr.diag.*
 import com.github.nrfr.manager.CarrierConfigManager
 import com.github.nrfr.model.SimCardInfo
+import com.github.nrfr.region.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 只读诊断界面。
+ * 地区 Profile / 诊断界面。
  *
- * Phase A (baseline) runs automatically and mutates nothing. Phase B (the CarrierService probe)
- * is behind an explicit confirmation, is refused outright when another carrier app is bound, and
- * reverts itself — see [CarrierServiceProbe].
+ * Structure follows the architecture rather than the history of experiments: a read-only snapshot,
+ * a capability matrix, one transactional profile runner, and two recovery actions. Earlier
+ * iterations accumulated a card per one-off experiment; that is deliberately gone.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,27 +49,27 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var busyLabel by remember { mutableStateOf("") }
     var confirmProbe by remember { mutableStateOf(false) }
-    var confirmExperiment by remember { mutableStateOf(false) }
-    var experimentCountry by remember { mutableStateOf(CountryOverrideExperiment.DEFAULT_TEST_COUNTRY) }
-    var experiment by remember { mutableStateOf<CountryOverrideResult?>(null) }
+    var confirmProfile by remember { mutableStateOf(false) }
+    var selectedProfile by remember { mutableStateOf(RegionalProfile.PRESETS.first()) }
+    var txResult by remember { mutableStateOf<TransactionResult?>(null) }
     var recoveryCountry by remember { mutableStateOf("cn") }
     var recoverySteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
     var releaseSteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
+    var pendingRecovery by remember { mutableStateOf(false) }
 
     fun collect(sim: SimCardInfo) {
         scope.launch {
-            busy = true; busyLabel = "正在采集基线…"
+            busy = true; busyLabel = "正在采集快照…"
             report = withContext(Dispatchers.IO) {
                 DiagnosticCollector.collect(context, sim.slot - 1, sim.subId)
             }
+            pendingRecovery = withContext(Dispatchers.IO) { RecoveryManager.hasPendingWork(context) }
             busy = false
         }
     }
 
-    // getDataNetworkType() throws SecurityException without READ_PHONE_STATE. Asking for it up
-    // front makes the network type readable *both* before and after the probe, so it becomes a
-    // genuinely comparable field rather than a permission artifact. If it is denied, the
-    // comparison degrades to "not comparable" instead of looking like a mutation.
+    // getDataNetworkType() throws SecurityException without READ_PHONE_STATE. Asking up front makes
+    // the network type comparable before and after a transaction rather than a permission artifact.
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { selected?.let { collect(it) } }
@@ -86,7 +87,7 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("电话状态诊断") },
+                title = { Text("地区 Profile / 诊断") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")
@@ -123,35 +124,70 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                 }
             }
 
+            if (pendingRecovery) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("检测到未完成的事务", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "上一次事务没有干净收尾（可能因崩溃、进程被杀或重启）。点击补完回滚。",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    busy = true; busyLabel = "正在补完回滚…"
+                                    val outcomes = withContext(Dispatchers.IO) {
+                                        RecoveryManager.recoverAll(context)
+                                    }
+                                    recoverySteps = outcomes.flatMap { it.steps }
+                                    selected?.let { sim ->
+                                        report = withContext(Dispatchers.IO) {
+                                            DiagnosticCollector.collect(context, sim.slot - 1, sim.subId)
+                                        }
+                                    }
+                                    pendingRecovery = withContext(Dispatchers.IO) {
+                                        RecoveryManager.hasPendingWork(context)
+                                    }
+                                    busy = false
+                                }
+                            },
+                            enabled = !busy
+                        ) { Text("补完回滚") }
+                    }
+                }
+            }
+
             val r = report
             if (r == null) {
                 if (!busy) Text("未能采集到 SIM 信息。请确认已插卡并已授权 Shizuku。")
             } else {
                 DeviceCard(r)
+                CapabilityCard()
+
+                ProfileCard(
+                    profiles = RegionalProfile.PRESETS,
+                    selected = selectedProfile,
+                    onSelect = { selectedProfile = it },
+                    result = txResult,
+                    enabled = !busy && r.probeIsSafe,
+                    blockedReason = if (!r.probeIsSafe)
+                        "已有其它应用被绑定为 CarrierService（${r.existingCarrierServicePackage}）"
+                    else null,
+                    onRun = { confirmProfile = true }
+                )
 
                 ValueSource.entries.forEach { source ->
                     val values = r.bySource(source)
                     if (values.isNotEmpty()) SourceCard(source, values)
                 }
 
-                ProbeCard(
-                    report = r,
-                    enabled = !busy,
-                    onRun = { confirmProbe = true }
-                )
-
-                CountryExperimentCard(
-                    report = r,
-                    result = experiment,
-                    country = experimentCountry,
-                    onCountryChange = { input ->
-                        if (input.length <= 2 && input.all { it.isLetter() }) {
-                            experimentCountry = input.lowercase()
-                        }
-                    },
-                    enabled = !busy,
-                    onRun = { confirmExperiment = true }
-                )
+                ProbeCard(report = r, enabled = !busy, onRun = { confirmProbe = true })
 
                 ReleaseCard(
                     boundPackage = r.existingCarrierServicePackage,
@@ -204,7 +240,8 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                 OutlinedButton(
                     onClick = {
                         val text = ReportFormatter.format(r) +
-                                (experiment?.let { "\n" + ReportFormatter.formatCountryExperiment(it) } ?: "")
+                                "\n" + ReportFormatter.formatCapabilities() +
+                                (txResult?.let { "\n" + ReportFormatter.formatTransaction(it) } ?: "")
                         copyToClipboard(context, text)
                         Toast.makeText(context, "报告已复制到剪贴板", Toast.LENGTH_SHORT).show()
                     },
@@ -223,13 +260,8 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
             title = { Text("运行 CarrierService 探测？") },
             text = {
                 Text(
-                    "这会短暂地：\n" +
-                            "• 用 SIM 的真实 MCC/MNC 与 SPN 调用 setCarrierTestOverride（值不变）\n" +
-                            "• 把本应用注册为 CarrierService\n" +
-                            "• 只返回一个随机哨兵键，不含任何真实电话参数\n" +
-                            "• 立即全部还原，并对比探测前后的身份值\n\n" +
-                            "不会修改 MCC/MNC、国家码、APN 或 SIM 卡本身。\n" +
-                            "若探测中出现任何异常，请立即在主界面点击「还原设置」。"
+                    "只返回一个随机哨兵键，不含任何真实电话参数，结束后自动还原并释放绑定。\n" +
+                            "用于验证机制本身，不改变任何身份值。"
                 )
             },
             confirmButton = {
@@ -249,122 +281,160 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                     }
                 }, enabled = r?.probeIsSafe == true) { Text("开始探测") }
             },
-            dismissButton = {
-                TextButton(onClick = { confirmProbe = false }) { Text("取消") }
-            }
+            dismissButton = { TextButton(onClick = { confirmProbe = false }) { Text("取消") } }
         )
     }
 
-    if (confirmExperiment) {
+    if (confirmProfile) {
         val r = report
         AlertDialog(
-            onDismissRequest = { confirmExperiment = false },
-            title = { Text("运行 SIM 国家码实验（$experimentCountry）？") },
+            onDismissRequest = { confirmProfile = false },
+            title = { Text("应用 Profile：${selectedProfile.name}？") },
             text = {
                 Text(
-                    "这会短暂地把 SIM 国家码覆盖为「$experimentCountry」，用来验证\n" +
-                            "KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING 在本机是否真的生效。\n\n" +
-                            "只下发这一个键。不会修改：\n" +
-                            "• SIM / 网络 MCC/MNC（仍为 46000）\n" +
-                            "• 网络国家码（仍为 cn）\n" +
-                            "• Carrier ID、APN、漫游状态\n" +
-                            "• 物理 SIM 卡\n\n" +
-                            "结束后自动还原，并逐项对比实验前后的值。\n" +
-                            "若出现异常，请到主界面点击「还原设置」。"
+                    buildString {
+                        appendLine("将改动以下信号：")
+                        selectedProfile.touchedSignals().forEach {
+                            appendLine("• ${it.label} — ${SignalCapabilities[it].status.label}")
+                        }
+                        appendLine()
+                        if (selectedProfile.usesExperimentalMechanism()) {
+                            appendLine("⚠️ 含尚未在真机验证的机制（MCC/MNC）。")
+                            appendLine("它会连带改变 Carrier ID，并可能影响 APN 匹配与移动数据。")
+                            appendLine()
+                        }
+                        appendLine("不会改动：网络国家码 / 网络 MCC/MNC / APN / 物理 SIM。")
+                        appendLine("事务结束时自动还原，并逐项验证清理是否完整。")
+                    }
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
-                    confirmExperiment = false
+                    confirmProfile = false
                     val sim = selected ?: return@TextButton
                     scope.launch {
-                        busy = true; busyLabel = "正在运行国家码实验（约 20-40 秒）…"
-                        val res = withContext(Dispatchers.IO) {
-                            CountryOverrideExperiment.run(
-                                context, sim.slot - 1, sim.subId, experimentCountry
-                            )
+                        busy = true; busyLabel = "正在执行事务（约 30-60 秒）…"
+                        txResult = withContext(Dispatchers.IO) {
+                            RegionTransaction.run(context, sim.slot - 1, sim.subId, selectedProfile)
                         }
-                        experiment = res
                         report = withContext(Dispatchers.IO) {
                             DiagnosticCollector.collect(context, sim.slot - 1, sim.subId)
                                 .copy(probe = report?.probe)
                         }
+                        pendingRecovery = withContext(Dispatchers.IO) {
+                            RecoveryManager.hasPendingWork(context)
+                        }
                         busy = false
                     }
-                }, enabled = r?.probeIsSafe == true) { Text("开始实验") }
+                }, enabled = r?.probeIsSafe == true) { Text("执行") }
             },
-            dismissButton = {
-                TextButton(onClick = { confirmExperiment = false }) { Text("取消") }
-            }
+            dismissButton = { TextButton(onClick = { confirmProfile = false }) { Text("取消") } }
         )
     }
 }
 
-/**
- * 「只改 SIM 国家码」实验。
- *
- * Reports A/B/C/D as four independent lines, because "the config was accepted" and "the country
- * actually changed" are genuinely different findings and conflating them would hide the exact
- * thing this experiment exists to measure.
- */
+// ------------------------------------------------------------------------ cards
+
 @Composable
-private fun CountryExperimentCard(
-    report: DiagnosticReport,
-    result: CountryOverrideResult?,
-    country: String,
-    onCountryChange: (String) -> Unit,
+private fun CapabilityCard() {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("信号能力矩阵", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "真机验证基准：${SignalCapabilities.VERIFIED_ON}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            SignalCapabilities.all().forEach { c ->
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Text(c.signal.label, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "${c.signal.provenance.label} · ${c.signal.mechanism.label}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(c.status.label, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
+
+/** 地区 Profile 卡片 —— 取代此前一个个堆叠的一次性实验卡。 */
+@Composable
+private fun ProfileCard(
+    profiles: List<RegionalProfile>,
+    selected: RegionalProfile,
+    onSelect: (RegionalProfile) -> Unit,
+    result: TransactionResult?,
     enabled: Boolean,
+    blockedReason: String?,
     onRun: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
-            Text("SIM 国家码覆盖实验", style = MaterialTheme.typography.titleMedium)
+            Text("地区 Profile（事务型）", style = MaterialTheme.typography.titleMedium)
             Text(
-                "只下发 KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING 一个键，验证 getSimCountryIso() 是否真的改变。" +
-                        "不改 MCC/MNC、不改网络、不改 APN，结束后自动还原。",
+                "快照 → 校验基线 → 应用 → 验证 → 还原 → 释放 → 验证清理完整。" +
+                        "任何一步失败都会自动回滚；崩溃或重启也会在下次启动时补完。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
 
-            OutlinedTextField(
-                value = country,
-                onValueChange = onCountryChange,
-                label = { Text("测试国家码（2 位字母）") },
-                singleLine = true,
-                isError = country.length != 2,
-                modifier = Modifier.fillMaxWidth()
-            )
+            profiles.forEach { p ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = selected == p, onClick = { onSelect(p) })
+                    Column(Modifier.weight(1f)) {
+                        Text(p.name, style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            p.touchedSignals().joinToString(", ") { it.label },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
 
-            result?.let { r ->
+            result?.let { res ->
                 Spacer(Modifier.height(8.dp))
-                r.steps.forEach { s ->
+                res.steps.forEach { s ->
                     Text(
                         "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { "\n     $it" } ?: ""}",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
-                Spacer(Modifier.height(8.dp))
-                Verdict("A. CarrierConfig 接受该键", r.overrideAccepted)
-                Verdict(
-                    "B. getSimCountryIso() 改变 (${r.simCountryBefore ?: "?"} → ${r.simCountryDuring ?: "?"})",
-                    r.simCountryChanged && r.simCountryMatchesRequest
-                )
-                Verdict("C. 网络国家码保持不变", r.networkCountryHeld)
-                Verdict("D. SIM MCC/MNC 保持不变", r.simOperatorHeld)
-                Verdict("   Carrier ID 保持不变", r.carrierIdHeld)
-                Verdict("   APN 保持不变", r.apnHeld)
+                Spacer(Modifier.height(6.dp))
+                res.effects.forEach { e ->
+                    Text(
+                        "${e.signal.label}: ${e.before ?: "?"} → ${e.during ?: "?"}  ${e.outcome.label}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text("清理完整性", style = MaterialTheme.typography.labelMedium)
+                Verdict("原始身份已还原", res.cleanup.identityRestored)
+                Verdict("CarrierConfig 已还原", res.cleanup.carrierConfigRestored)
+                Verdict("CarrierService 已释放", res.cleanup.carrierServiceReleased)
+                Verdict("carrier privileges 已撤销", res.cleanup.carrierPrivilegesReleased)
+                Verdict("无意外身份变化", res.cleanup.noUnexpectedChanges)
+                Verdict("APN/数据未受损", res.cleanup.apnDataIntact)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "结论：${r.verdict.label}",
+                    if (res.success) "事务结论：成功 ✅" else "事务结论：未成功 ❌",
                     style = MaterialTheme.typography.titleSmall,
-                    color = if (r.verdict == OverrideVerdict.EFFECTIVE)
-                        MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                    color = if (res.success) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error
                 )
-                Verdict("已自动还原（SIM 国家码现为 ${r.simCountryAfter ?: "?"}）", r.revertRestored)
-                if (r.unexpectedSideEffects.isNotEmpty()) {
+                if (!res.cleanup.complete) {
                     Text(
-                        "⚠️ 意外副作用：${r.unexpectedSideEffects.joinToString(", ") { it.key }}",
+                        "未满足：${res.cleanup.failures().joinToString("; ")}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
@@ -372,120 +442,19 @@ private fun CountryExperimentCard(
                 Spacer(Modifier.height(8.dp))
             }
 
-            Button(
-                onClick = onRun,
-                enabled = enabled && report.probeIsSafe && country.length == 2,
-                modifier = Modifier.fillMaxWidth()
-            ) { Text(if (result == null) "运行国家码实验" else "重新运行") }
-        }
-    }
-}
-
-/**
- * 释放卡片：把本应用从 CarrierService 绑定中解除。
- *
- * Needed as a standalone action because a stranded binding blocks every subsequent probe: the
- * safety precondition sees a CarrierService already bound and refuses to run.
- */
-@Composable
-private fun ReleaseCard(
-    boundPackage: String?,
-    ourPackage: String,
-    steps: List<ProbeStep>,
-    enabled: Boolean,
-    onRun: () -> Unit
-) {
-    val stranded = boundPackage == ourPackage
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp)) {
-            Text("释放 CarrierService", style = MaterialTheme.typography.titleMedium)
-            Text(
-                if (stranded)
-                    "⚠️ 本应用当前仍被绑定为 CarrierService，这会导致后续探测/实验被安全检查拒绝执行。"
-                else
-                    "当前绑定：${boundPackage ?: "(无)"}。用于清理残留绑定，可安全重复执行。",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (stranded) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                "顺序：先撤销 carrier privileges，再清除 override，然后轮询确认框架真的已不再绑定。" +
-                        "不会改动 SIM 国家码、MCC/MNC 或 APN。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            steps.forEach { s ->
+            blockedReason?.let {
                 Text(
-                    "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}",
-                    style = MaterialTheme.typography.bodySmall
+                    "已禁用：$it",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
                 )
             }
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = onRun,
-                enabled = enabled,
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("释放 CarrierService") }
-        }
-    }
-}
 
-/**
- * 恢复卡片：把 SIM 国家码强制写回指定值。
- *
- * The property is one-way — removing the override does not undo it — so a device left on the
- * wrong country needs the correct value written again deliberately.
- */
-@Composable
-private fun RecoveryCard(
-    target: String,
-    onTargetChange: (String) -> Unit,
-    steps: List<ProbeStep>,
-    enabled: Boolean,
-    onRun: () -> Unit
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp)) {
-            Text("恢复 SIM 国家码", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "若 SIM 国家码被留在了错误的值上，用这里把它写回去。\n" +
-                        "提示：切换飞行模式约 10 秒、或重启手机，同样能让系统从 SIM 的 IMSI 重新读取真实国家码，" +
-                        "且完全不需要本应用。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = target,
-                onValueChange = onTargetChange,
-                label = { Text("目标国家码（原值，通常为 cn）") },
-                singleLine = true,
-                isError = target.length != 2,
-                modifier = Modifier.fillMaxWidth()
-            )
-            steps.forEach { s ->
-                Text(
-                    "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+            Button(onClick = onRun, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text(if (result == null) "执行事务" else "重新执行")
             }
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(
-                onClick = onRun,
-                enabled = enabled,
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("恢复为 $target") }
         }
     }
-}
-
-@Composable
-private fun Verdict(label: String, ok: Boolean) {
-    Text(
-        "${if (ok) "✅" else "❌"} $label",
-        style = MaterialTheme.typography.bodySmall,
-        color = if (ok) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error
-    )
 }
 
 @Composable
@@ -504,7 +473,7 @@ private fun DeviceCard(r: DiagnosticReport) {
             Text(
                 r.existingCarrierServicePackage
                     ?.let { "⚠️ 已有 CarrierService 绑定: $it" }
-                    ?: "当前无 CarrierService 绑定（可安全探测）",
+                    ?: "当前无 CarrierService 绑定",
                 style = MaterialTheme.typography.bodySmall,
                 color = if (r.probeIsSafe) MaterialTheme.colorScheme.onSurfaceVariant
                 else MaterialTheme.colorScheme.error
@@ -553,7 +522,7 @@ private fun ProbeCard(report: DiagnosticReport, enabled: Boolean, onRun: () -> U
         Column(Modifier.padding(16.dp)) {
             Text("CarrierService 机制探测", style = MaterialTheme.typography.titleMedium)
             Text(
-                "验证 Android 16 方案在本机是否真的可用。只返回随机哨兵键，不改任何真实电话参数，结束后自动还原。",
+                "只返回随机哨兵键，不改任何真实电话参数，结束后自动还原并释放绑定。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -567,38 +536,11 @@ private fun ProbeCard(report: DiagnosticReport, enabled: Boolean, onRun: () -> U
                     )
                 }
                 Spacer(Modifier.height(8.dp))
-
-                // Two independent verdicts. A field merely becoming readable must never drag the
-                // mechanism verdict down.
-                Text(
-                    if (p.mechanismWorks) "机制结论：Android 16 CarrierService 方案在本机可用 ✅"
-                    else "机制结论：不可用 ❌",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (p.mechanismWorks) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.error
-                )
-                Text(
-                    if (p.revertClean) "还原结论：身份值已完好还原 ✅"
-                    else "还原结论：存在未还原的身份值 ❌",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (p.revertClean) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.error
-                )
-
-                if (p.mutations.isNotEmpty()) {
-                    Text(
-                        "⚠️ 以下身份值发生变化：${p.mutations.joinToString(", ") { it.key }}\n" +
-                                "请到主界面点击「还原设置」。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
+                Verdict("机制可用（onLoadConfig 被回调且配置已合并）", p.mechanismWorks)
+                Verdict("身份值已完好还原", p.revertClean)
                 if (p.notes.isNotEmpty()) {
                     Spacer(Modifier.height(4.dp))
-                    Text(
-                        "观测差异（不影响结论）",
-                        style = MaterialTheme.typography.labelMedium
-                    )
+                    Text("观测差异（不影响结论）", style = MaterialTheme.typography.labelMedium)
                     p.notes.forEach {
                         Text(
                             ReportFormatter.describe(it),
@@ -612,19 +554,116 @@ private fun ProbeCard(report: DiagnosticReport, enabled: Boolean, onRun: () -> U
 
             if (!report.probeIsSafe) {
                 Text(
-                    "已禁用：本机已有其它应用被绑定为 CarrierService，顶替它可能丢失其提供的配置。",
+                    "已禁用：本机已有其它应用被绑定为 CarrierService。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error
                 )
             }
 
-            Button(
+            OutlinedButton(
                 onClick = onRun,
                 enabled = enabled && report.probeIsSafe,
                 modifier = Modifier.fillMaxWidth()
             ) { Text(if (report.probe == null) "运行探测" else "重新探测") }
         }
     }
+}
+
+/**
+ * 释放卡片：把本应用从 CarrierService 绑定中解除。
+ *
+ * Needed as a standalone action because a stranded binding blocks every subsequent transaction:
+ * the safety precondition sees a CarrierService already bound and refuses to run.
+ */
+@Composable
+private fun ReleaseCard(
+    boundPackage: String?,
+    ourPackage: String,
+    steps: List<ProbeStep>,
+    enabled: Boolean,
+    onRun: () -> Unit
+) {
+    val stranded = boundPackage == ourPackage
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("释放 CarrierService", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (stranded)
+                    "⚠️ 本应用当前仍被绑定为 CarrierService，会导致后续事务被安全检查拒绝。"
+                else
+                    "当前绑定：${boundPackage ?: "(无)"}。用于清理残留绑定，可安全重复执行。",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (stranded) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "顺序：先撤销 carrier privileges，再清除 override，然后轮询确认框架真的已不再绑定。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            steps.forEach { s ->
+                Text(
+                    "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = onRun, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text("释放 CarrierService")
+            }
+        }
+    }
+}
+
+/** 恢复卡片：把 SIM 国家码强制写回指定值。 */
+@Composable
+private fun RecoveryCard(
+    target: String,
+    onTargetChange: (String) -> Unit,
+    steps: List<ProbeStep>,
+    enabled: Boolean,
+    onRun: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("恢复 SIM 国家码", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "若 SIM 国家码被留在了错误的值上，用这里写回去。\n" +
+                        "提示：切换飞行模式约 10 秒或重启，同样能让系统从 IMSI 重新读取真实国家码，" +
+                        "且完全不需要本应用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = target,
+                onValueChange = onTargetChange,
+                label = { Text("目标国家码（原值，通常为 cn）") },
+                singleLine = true,
+                isError = target.length != 2,
+                modifier = Modifier.fillMaxWidth()
+            )
+            steps.forEach { s ->
+                Text(
+                    "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = onRun, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text("恢复为 $target")
+            }
+        }
+    }
+}
+
+@Composable
+private fun Verdict(label: String, ok: Boolean) {
+    Text(
+        "${if (ok) "✅" else "❌"} $label",
+        style = MaterialTheme.typography.bodySmall,
+        color = if (ok) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error
+    )
 }
 
 private fun copyToClipboard(context: Context, text: String) {

@@ -61,12 +61,14 @@ class NrfrCarrierService : CarrierService() {
             }
         }
 
-        // Country-only experiment: exactly one key, nothing else — no carrier name, no MCC/MNC.
-        CarrierServiceBridge.experimentCountryIso?.let { iso ->
-            Log.i(TAG, "onLoadConfig(subId=$subscriptionId) -> EXPERIMENT country=$iso")
-            return PersistableBundle().apply {
-                putString(CarrierConfigKeys.KEY_SIM_COUNTRY_ISO, iso)
-            }
+        // Transaction mode: exactly the keys this profile asks for, nothing else.
+        // MCC/MNC is deliberately absent — no CarrierConfig key exists for it, so it travels via
+        // setCarrierTestOverride instead.
+        CarrierServiceBridge.activeProfile?.let { profile ->
+            Log.i(TAG, "onLoadConfig(subId=$subscriptionId) -> PROFILE ${profile.name}")
+            return toBundle(
+                OverrideSpec(countryIso = profile.countryIso, carrierName = profile.operatorName)
+            )
         }
 
         val spec = runCatching { OverrideStore.get(this, subscriptionId) }

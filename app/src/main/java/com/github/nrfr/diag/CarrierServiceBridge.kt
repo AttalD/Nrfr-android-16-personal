@@ -1,5 +1,6 @@
 package com.github.nrfr.diag
 
+import com.github.nrfr.region.RegionalProfile
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -46,13 +47,13 @@ object CarrierServiceBridge {
     var probeToken: String? = null
 
     /**
-     * 「只改国家码」实验模式：服务只下发 `KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING`，别的一律不发。
+     * 事务模式：服务只下发该 profile 对应的 CarrierConfig 键，别的一律不发。
      *
-     * Deliberately separate from the normal [com.github.nrfr.data.OverrideStore] path so the
-     * experiment cannot accidentally carry a carrier-name override or anything else along with it.
+     * Deliberately separate from the normal [com.github.nrfr.data.OverrideStore] path so a
+     * transaction can never accidentally carry a persisted user override along with it.
      */
     @Volatile
-    var experimentCountryIso: String? = null
+    var activeProfile: RegionalProfile? = null
 
     private val invocations = AtomicInteger(0)
 
@@ -70,7 +71,7 @@ object CarrierServiceBridge {
     fun reset() {
         restoreCountryIso = null
         probeToken = null
-        experimentCountryIso = null
+        activeProfile = null
         lastSubId = -1
         invocations.set(0)
     }

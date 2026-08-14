@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import com.github.nrfr.data.OverrideStore
 import com.github.nrfr.manager.ApplyResult
 import com.github.nrfr.manager.CarrierConfigManager
+import com.github.nrfr.region.RecoveryManager
 import com.github.nrfr.ui.screens.AboutScreen
 import com.github.nrfr.ui.screens.DiagnosticsScreen
 import com.github.nrfr.ui.screens.MainScreen
@@ -93,6 +94,20 @@ class MainActivity : ComponentActivity() {
     private fun reapplyAfterReboot() {
         if (reapplyDone) return
         reapplyDone = true
+
+        // Finish any transaction that did not close cleanly (crash, process death, reboot).
+        // Runs before re-applying anything so we never stack a new override on a dirty state.
+        if (RecoveryManager.hasPendingWork(this)) {
+            val outcomes = runCatching { RecoveryManager.recoverAll(this) }.getOrNull().orEmpty()
+            val stillDirty = outcomes.count { !it.recovered }
+            Toast.makeText(
+                this,
+                if (stillDirty == 0) "已自动补完上次未完成的回滚"
+                else "有 $stillDirty 个事务仍未回滚干净，请打开诊断界面处理",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+
         if (OverrideStore.configuredSubIds(this).isEmpty()) return
         val results = runCatching { CarrierConfigManager.reapplyAll(this) }.getOrNull().orEmpty()
         val failed = results.values.filterIsInstance<ApplyResult.Failure>()

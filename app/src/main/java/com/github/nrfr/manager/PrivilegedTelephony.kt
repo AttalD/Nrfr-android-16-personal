@@ -109,6 +109,24 @@ object PrivilegedTelephony {
         carrierPrivilegeRules = CertHash.carrierPrivilegeRule(certSha256Hex)
     )
 
+    /**
+     * Writes the SIM operator numeric / name **while keeping** the given privilege rules.
+     *
+     * This is the only mechanism that can change `getSimOperator()`: there is no CarrierConfig key
+     * for MCC/MNC, so the CarrierService route cannot touch it. It is also how the value is
+     * restored — unlike the country ISO, this writes the property directly, so putting the real
+     * value back is a plain write rather than a push-and-drop.
+     *
+     * Pass a null [certSha256Hex] to write the values *and* drop the privileges in one call.
+     */
+    fun writeSimIdentity(subId: Int, certSha256Hex: String?, mccMnc: String?, spn: String?) =
+        setCarrierTestOverride(
+            subId = subId,
+            mccMnc = mccMnc,
+            spn = spn,
+            carrierPrivilegeRules = certSha256Hex?.let { CertHash.carrierPrivilegeRule(it) }
+        )
+
     /** Drops the privilege rules again, restoring the SIM's own values. */
     fun clearCarrierPrivileges(subId: Int, realMccMnc: String?, realSpn: String?) =
         setCarrierTestOverride(

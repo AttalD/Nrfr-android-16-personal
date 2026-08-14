@@ -1,6 +1,8 @@
 package com.github.nrfr.diag
 
 import com.github.nrfr.manager.CarrierConfigKeys
+import com.github.nrfr.region.SignalCapabilities
+import com.github.nrfr.region.TransactionResult
 
 /**
  * 把 [DiagnosticReport] 渲染成可复制/分享的纯文本。
@@ -133,41 +135,63 @@ object ReportFormatter {
         }
     }
 
-    /** 「只改国家码」实验的报告段落。 */
-    fun formatCountryExperiment(r: CountryOverrideResult): String = buildString {
-        appendLine("===== SIM 国家码覆盖实验（目标: ${r.requestedCountry}）=====")
+    /** 事务报告段落。 */
+    fun formatTransaction(r: TransactionResult): String = buildString {
+        appendLine("===== 地区 Profile 事务：${r.profile.name} =====")
         for (s in r.steps) {
             appendLine("${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}")
         }
         appendLine()
-        appendLine("A. CarrierConfig 是否接受该键: ${if (r.overrideAccepted) "是" else "否"}" +
-                " (${CarrierConfigKeys.KEY_SIM_COUNTRY_ISO} = ${r.configKeyValue ?: "未出现"})")
-        appendLine("B. getSimCountryIso() 是否改变: ${if (r.simCountryChanged) "是" else "否"}" +
-                " (${r.simCountryBefore ?: "?"} → ${r.simCountryDuring ?: "?"})")
-        appendLine("C. 网络国家码是否保持: ${if (r.networkCountryHeld) "是" else "否"}")
-        appendLine("D. SIM MCC/MNC 是否保持: ${if (r.simOperatorHeld) "是" else "否"}")
-        appendLine("   网络 MCC/MNC 是否保持: ${if (r.networkOperatorHeld) "是" else "否"}")
-        appendLine("   Carrier ID 是否保持: ${if (r.carrierIdHeld) "是" else "否"}")
-        appendLine("   APN 是否保持: ${if (r.apnHeld) "是" else "否"}")
-        appendLine("   漫游状态是否保持: ${if (r.roamingHeld) "是" else "否"}")
-        appendLine()
-        appendLine(">>> 结论: ${r.verdict.label}")
-        appendLine(">>> 还原: ${if (r.revertRestored) "已完全还原 ✅" else "存在未还原的值 ❌"}" +
-                " (SIM 国家码现为 ${r.simCountryAfter ?: "?"})")
-        appendLine(">>> CarrierService 释放: ${if (r.carrierServiceReleased) "已释放 ✅" else "仍被绑定 ❌"}" +
-                " (框架报告绑定 = ${r.boundPackageAfter ?: "无"})")
-        appendLine(">>> 整体清理: ${if (r.fullyRestored) "干净 ✅" else "不干净 ❌"}")
-        if (r.unexpectedSideEffects.isNotEmpty()) {
-            appendLine("⚠️ 意外副作用:")
-            r.unexpectedSideEffects.forEach { appendLine("  ${describe(it)}") }
-        }
-        if (r.revertFailures.isNotEmpty()) {
-            appendLine("❌ 未还原的值:")
-            r.revertFailures.forEach { appendLine("  ${describe(it)}") }
+        appendLine("--- 各信号生效情况 ---")
+        if (r.effects.isEmpty()) appendLine("(未进入应用阶段)")
+        for (e in r.effects) {
+            appendLine("${e.signal.label} → 请求 ${e.requested}")
+            appendLine("    ${e.before ?: "?"} → ${e.during ?: "?"}  结论=${e.outcome.label}")
+            appendLine(
+                "    配置是否被接受=" + when (e.configAccepted) {
+                    null -> "不适用（该机制不经 CarrierConfig）"
+                    true -> "是"
+                    false -> "否"
+                }
+            )
         }
         appendLine()
-        appendLine("实验中逐项对比:")
-        r.comparisonsDuring.forEach { appendLine("  ${describe(it)}") }
+        appendLine("--- 清理完整性（全部条件均须满足）---")
+        appendLine("原始身份已还原: ${yn(r.cleanup.identityRestored)}")
+        appendLine("CarrierConfig 已还原: ${yn(r.cleanup.carrierConfigRestored)}")
+        appendLine("CarrierService 已释放: ${yn(r.cleanup.carrierServiceReleased)}")
+        appendLine("carrier privileges 已撤销: ${yn(r.cleanup.carrierPrivilegesReleased)}")
+        appendLine("无意外身份变化: ${yn(r.cleanup.noUnexpectedChanges)}")
+        appendLine("APN/数据未受损: ${yn(r.cleanup.apnDataIntact)}")
+        appendLine(">>> 清理完整: ${if (r.cleanup.complete) "是 ✅" else "否 ❌"}")
+        if (r.cleanup.failures().isNotEmpty()) {
+            appendLine("未满足: ${r.cleanup.failures().joinToString("; ")}")
+        }
+        if (r.cleanup.unexpectedChanges.isNotEmpty()) {
+            appendLine("意外变化:")
+            r.cleanup.unexpectedChanges.forEach { appendLine("  ${describe(it)}") }
+        }
+        r.cleanup.notes.forEach { appendLine("备注: $it") }
+        appendLine()
+        appendLine(">>> 事务总体结论: ${if (r.success) "成功 ✅" else "未成功 ❌"}")
+        appendLine("    （需同时满足：全部请求信号生效 且 清理完整）")
+    }
+
+    private fun yn(b: Boolean) = if (b) "是 ✅" else "否 ❌"
+
+    /** 能力矩阵段落 —— 明确区分已验证 / 实验性 / 免 root 不可改。 */
+    fun formatCapabilities(): String = buildString {
+        appendLine("===== 信号能力矩阵 =====")
+        appendLine("真机验证基准: ${SignalCapabilities.VERIFIED_ON}")
+        appendLine()
+        for (c in SignalCapabilities.all()) {
+            appendLine("${c.signal.label}")
+            appendLine("    来源=${c.signal.provenance.label}")
+            appendLine("    机制=${c.signal.mechanism.label}")
+            appendLine("    应用可见性=${c.signal.appReadable.label}")
+            appendLine("    状态=${c.status.label}")
+            appendLine("    依据=${c.evidence}")
+        }
     }
 
     /** 单行描述，用于报告与界面。 */

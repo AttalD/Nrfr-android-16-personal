@@ -1,6 +1,7 @@
 package com.github.nrfr
 
 import com.github.nrfr.diag.*
+import com.github.nrfr.region.*
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,54 +29,48 @@ class CarrierServiceReleaseTest {
         assertTrue(CarrierServiceRelease.isReleased("com.oem.carrier", ours))
     }
 
-    // --------------------------------------------------- experiment integration
+    // --------------------------------------------------- transaction integration
 
-    private fun cmp(key: String, before: String?, after: String?) = ValueComparison(
-        key, key,
-        if (before == after) ComparisonOutcome.UNCHANGED else ComparisonOutcome.CHANGED,
-        before, after, isIdentity = true
-    )
-
-    private fun result(released: Boolean, bound: String?) = CountryOverrideResult(
-        requestedCountry = "us",
-        steps = listOf(ProbeStep("register", true)),
-        configKeyPresent = true,
-        configKeyValue = "us",
-        simCountryBefore = "cn",
-        simCountryDuring = "us",
-        simCountryAfter = "cn",
-        originalConfigKey = null,
-        postCleanupConfigKey = null,
-        restoreOutcome = RestoreOutcome.RESTORED,
+    private fun cleanup(released: Boolean) = CleanupReport(
+        identityRestored = true,
+        carrierConfigRestored = true,
         carrierServiceReleased = released,
-        boundPackageAfter = bound,
-        comparisonsDuring = listOf(cmp("sim_country_iso", "cn", "us")),
-        comparisonsAfter = listOf(cmp("sim_country_iso", "cn", "cn"))
+        carrierPrivilegesReleased = released,
+        noUnexpectedChanges = true,
+        apnDataIntact = true
     )
 
     @Test
-    fun `a leftover binding makes the run not fully restored`() {
+    fun `a leftover binding makes cleanup incomplete`() {
         // Exactly run #9: country restored perfectly, but we stayed bound, which blocks the next
-        // probe. That is not a clean run.
-        val r = result(released = false, bound = ours)
-        assertTrue("country did come back", r.simCountryRestored)
-        assertTrue(r.configKeyRestored)
-        assertTrue(r.revertRestored)
-        assertFalse("but the binding leaked", r.fullyRestored)
-        assertFalse(r.cleanSuccess)
+        // transaction. That is not a clean run.
+        val c = cleanup(released = false)
+        assertTrue("identity did come back", c.identityRestored)
+        assertFalse("but the binding leaked", c.complete)
+        assertTrue(c.failures().any { it.contains("CarrierService") })
     }
 
     @Test
     fun `releasing the binding completes the cleanup`() {
-        val r = result(released = true, bound = null)
-        assertTrue(r.fullyRestored)
-        assertTrue(r.cleanSuccess)
+        assertTrue(cleanup(released = true).complete)
+        assertTrue(cleanup(released = true).failures().isEmpty())
     }
 
     @Test
-    fun `report states the post-cleanup binding`() {
-        val text = ReportFormatter.formatCountryExperiment(result(released = false, bound = ours))
-        assertTrue(text.contains("CarrierService"))
-        assertTrue(text.contains(ours))
+    fun `a transaction with leaked binding is not a success`() {
+        val tx = TransactionResult(
+            profile = RegionalProfile.countryOnly("us"),
+            steps = listOf(ProbeStep("apply", true)),
+            effects = listOf(
+                SignalEffect(
+                    Signal.SIM_COUNTRY_ISO, "us", "cn", "us",
+                    configAccepted = true, outcome = SignalOutcome.EFFECTIVE
+                )
+            ),
+            cleanup = cleanup(released = false),
+            applied = true
+        )
+        assertTrue("the override itself worked", tx.allEffective)
+        assertFalse("but the transaction is not a success", tx.success)
     }
 }
