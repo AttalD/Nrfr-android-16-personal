@@ -107,6 +107,7 @@ object RegionTransaction {
 
         var registered = false
         var during: List<DiagnosticValue> = emptyList()
+        var observations: List<String> = emptyList()
         var cleanup: CleanupReport
 
         try {
@@ -141,10 +142,23 @@ object RegionTransaction {
             // ---- 4. wait + verify each requested signal -----------------------------
             effects += verifySignals(context, subId, profile, before)
             during = DiagnosticCollector.collectAll(context, subId)
+            observations = observe(profile, before, during)
             steps += ProbeStep(
                 "⑤ 验证生效情况", effects.all { it.outcome == SignalOutcome.EFFECTIVE },
                 effects.joinToString("; ") { "${it.signal.key}=${it.outcome.label}" }
             )
+
+            // ---- 4b. let the radio settle before judging anything ------------------
+            // Changing the SIM operator numeric makes the framework re-evaluate APN selection and
+            // can bounce the data connection. Judging connectivity the instant the override lands
+            // would report a transient dip as damage.
+            if (profile.operatorNumeric != null) {
+                val settled = ApnDataSafety.awaitHealthy(context, subId)
+                steps += ProbeStep(
+                    "④b 等待射频/数据稳定", settled != DataHealth.DEGRADED,
+                    "数据状态 = ${settled.label}"
+                )
+            }
 
             // ---- 5. side-effect check ----------------------------------------------
             val duringCmp = ReportFormatter.compare(before, during)
@@ -181,10 +195,65 @@ object RegionTransaction {
             }
         }
 
-        return TransactionResult(profile, steps, effects, cleanup, applied = registered)
+        return TransactionResult(
+            profile, steps, effects, cleanup,
+            applied = registered, observations = observations
+        )
     }
 
     // ------------------------------------------------------------------ verification
+
+    /**
+     * 实验期间的显式观察项。
+     *
+     * Answers, in plain terms, the questions a physical-device tester actually needs: did the
+     * value move, did the derived Carrier ID follow, did APN change or merely become unreadable,
+     * is data healthy, and — critically — did the *network* side stay put.
+     */
+    private fun observe(
+        profile: RegionalProfile,
+        before: List<DiagnosticValue>,
+        during: List<DiagnosticValue>
+    ): List<String> = buildList {
+        fun b(key: String) = before.readable(key)
+        fun d(key: String) = during.readable(key)
+        fun readable(list: List<DiagnosticValue>, key: String) =
+            list.firstOrNull { it.key == key }?.error == null
+
+        profile.operatorNumeric?.let { target ->
+            val now = d(Signal.SIM_OPERATOR_NUMERIC.key)
+            add("SIM MCC/MNC: ${b(Signal.SIM_OPERATOR_NUMERIC.key)} → ${now ?: "?"} " +
+                    if (now == target) "（已变为目标值 $target ✅）" else "（未变为 $target ❌）")
+
+            val idBefore = b(Signal.SIM_CARRIER_ID.key)
+            val idAfter = d(Signal.SIM_CARRIER_ID.key)
+            add("Carrier ID: $idBefore → ${idAfter ?: "?"} " +
+                    if (idBefore != idAfter) "（已改变 —— 预期内，由 MCC/MNC 推导）"
+                    else "（未改变）")
+        }
+
+        val apnReadableBefore = readable(before, Signal.APN_DATA.key)
+        val apnReadableDuring = readable(during, Signal.APN_DATA.key)
+        add(
+            "APN: " + when {
+                !apnReadableBefore && !apnReadableDuring -> "两次均不可读（无法比较）"
+                !apnReadableBefore && apnReadableDuring -> "由不可读变为可读，值 = ${d(Signal.APN_DATA.key)}"
+                apnReadableBefore && !apnReadableDuring -> "由可读变为不可读（权限差异，非改动）"
+                b(Signal.APN_DATA.key) == d(Signal.APN_DATA.key) -> "未变 (${d(Signal.APN_DATA.key)})"
+                else -> "${b(Signal.APN_DATA.key)} → ${d(Signal.APN_DATA.key)}（预期内：APN 按运营商代码匹配）"
+            }
+        )
+
+        add("数据连通性: ${ApnDataSafety.healthOf(during).label}")
+
+        // The whole point of the safety story: the network side must be untouched.
+        val netOp = b(Signal.NETWORK_OPERATOR_NUMERIC.key) to d(Signal.NETWORK_OPERATOR_NUMERIC.key)
+        val netCo = b(Signal.NETWORK_COUNTRY_ISO.key) to d(Signal.NETWORK_COUNTRY_ISO.key)
+        add("网络 MCC/MNC: ${netOp.first} → ${netOp.second} " +
+                if (netOp.first == netOp.second) "（未变 ✅ 只读观测）" else "（意外变化 ❌）")
+        add("网络国家码: ${netCo.first} → ${netCo.second} " +
+                if (netCo.first == netCo.second) "（未变 ✅ 只读观测）" else "（意外变化 ❌）")
+    }
 
     private fun verifySignals(
         context: Context,

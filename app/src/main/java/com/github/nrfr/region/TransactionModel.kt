@@ -83,7 +83,15 @@ data class TransactionResult(
     val effects: List<SignalEffect>,
     val cleanup: CleanupReport,
     /** 事务是否真的执行到了"应用"阶段（前置检查失败时为 false）。 */
-    val applied: Boolean
+    val applied: Boolean,
+    /**
+     * 实验期间的显式观察项（人类可读）。
+     *
+     * Deliberately separate from [effects]: these are the derived/secondary consequences a tester
+     * needs stated in plain terms — Carrier ID drift, APN reselection, data health, and proof the
+     * network side did not move.
+     */
+    val observations: List<String> = emptyList()
 ) {
     /** 所有被请求改动的信号是否都真正生效。 */
     val allEffective: Boolean

@@ -156,6 +156,11 @@ object ReportFormatter {
             )
         }
         appendLine()
+        if (r.observations.isNotEmpty()) {
+            appendLine("--- 实验观察（次生影响与只读核对）---")
+            r.observations.forEach { appendLine("  $it") }
+            appendLine()
+        }
         appendLine("--- 清理完整性（全部条件均须满足）---")
         appendLine("原始身份已还原: ${yn(r.cleanup.identityRestored)}")
         appendLine("CarrierConfig 已还原: ${yn(r.cleanup.carrierConfigRestored)}")

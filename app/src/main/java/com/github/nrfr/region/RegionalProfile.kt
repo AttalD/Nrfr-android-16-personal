@@ -34,9 +34,18 @@ data class RegionalProfile(
     }
 
     /**
-     * 允许发生变化的信号键。清理阶段用它把"预期的改动"与"意外副作用"区分开。
+     * 应用阶段允许发生变化的信号键 —— 用来把"预期的改动"与"意外副作用"区分开。
+     *
+     * Note this is the **apply-phase** set only. Cleanup deliberately compares against an empty
+     * expected set, because after rollback nothing at all may differ from the baseline.
      */
-    fun expectedChangeKeys(): Set<String> = touchedSignals().map { it.key }.toSet()
+    fun expectedChangeKeys(): Set<String> = buildSet {
+        addAll(touchedSignals().map { it.key })
+        // APN selection is matched on the SIM operator numeric (see CarrierResolver / the APN
+        // database), so changing MCC/MNC legitimately reselects the APN. Expected while the
+        // override is live; it must still come back afterwards.
+        if (operatorNumeric != null) add(Signal.APN_DATA.key)
+    }
 
     /** 本 profile 是否涉及尚未在真机验证的机制。 */
     fun usesExperimentalMechanism(): Boolean =
