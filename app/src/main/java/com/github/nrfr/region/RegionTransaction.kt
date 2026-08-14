@@ -124,12 +124,19 @@ object RegionTransaction {
                 subId, context.packageName, context.packageName
             )
             registered = true
+            val touchesNumeric = profile.operatorNumeric != null
             steps += ProbeStep(
                 "④ 注册并应用", true,
                 "CarrierConfig 下发 ${describeConfigKeys(profile)}；" +
-                        "setCarrierTestOverride 写 MCC/MNC=$applyNumeric SPN=$applyName"
+                        if (touchesNumeric)
+                            "setCarrierTestOverride 修改 MCC/MNC=$applyNumeric SPN=$applyName（实验性）"
+                        else
+                            "setCarrierTestOverride 仅用于授予 carrier privileges，" +
+                                    "MCC/MNC=$applyNumeric SPN=$applyName 为真实值原样回填（不修改）"
             )
-            runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
+            // Must originate from our own UID, otherwise our cached bundle is not invalidated and
+            // the framework replays stale config instead of calling onLoadConfig().
+            PrivilegedTelephony.refreshCarrierConfig(subId)
 
             // ---- 4. wait + verify each requested signal -----------------------------
             effects += verifySignals(context, subId, profile, before)

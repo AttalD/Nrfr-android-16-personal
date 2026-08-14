@@ -81,15 +81,27 @@ object CountryIsoRestore {
                 Log.i(TAG, "pushing baseline country '$target' back (current=$current)")
 
                 // 1. Serve the baseline value and let the framework write it to the property.
+                //
+                // The refresh MUST originate from our own UID: notifyConfigChangedForSubId clears
+                // only the *calling* package's cached bundle, so going through Shizuku (uid shell)
+                // leaves our stale config on disk and the framework replays it from XML instead of
+                // calling onLoadConfig() again. See PrivilegedTelephony.notifyConfigChangedAsSelf.
                 CarrierServiceBridge.restoreCountryIso = target
-                runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
+                val invocationsBefore = CarrierServiceBridge.invocationCount()
+                PrivilegedTelephony.refreshCarrierConfig(subId)
+
+                val reAsked = waitFor(10_000L) {
+                    CarrierServiceBridge.invocationCount() > invocationsBefore
+                }
+                if (!reAsked) Log.w(TAG, "framework did not re-ask us for config (stale cache?)")
+
                 val landed = waitFor {
                     readSimCountry(context, subId)?.equals(target, ignoreCase = true) == true
                 }
 
                 // 2. Drop our key again so the merged config returns to its original shape.
                 CarrierServiceBridge.restoreCountryIso = null
-                runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
+                PrivilegedTelephony.refreshCarrierConfig(subId)
                 waitFor(5_000L) { readConfigCountry(context, subId) == null }
 
                 if (landed) RestoreOutcome.RESTORED else RestoreOutcome.FAILED

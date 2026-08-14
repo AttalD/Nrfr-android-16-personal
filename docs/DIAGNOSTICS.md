@@ -346,6 +346,65 @@ if (simPrivilegedPackages.contains(packageName)) { carrierServicePackageName = p
 2. 或重启手机；
 3. 或用诊断界面的「恢复 SIM 国家码」卡片，填入原值（通常 `cn`）后执行。
 
+
+### 4.9 run #11 的两个缺陷
+
+#### 缺陷一：还原时框架根本没有再来问我们（回滚失败的真正原因）
+
+`CarrierConfigLoader.notifyConfigChangedForSubId()` 只清除**调用方**那个包的磁盘缓存：
+
+```java
+String callingPackageName = mContext.getPackageManager().getNameForUid(Binder.getCallingUid());
+clearCachedConfigForPackage(callingPackageName);
+```
+
+我们一直经 Shizuku 调用它 —— 调用方是 `com.android.shell`，**我们自己的缓存从未被清除**。
+随后 `EVENT_DO_FETCH_CARRIER` 走的是：
+
+```java
+final PersistableBundle config = restoreConfigFromXml(carrierPackageName, "", phoneId);
+if (config != null) { mConfigFromCarrierApp[phoneId] = config; }   // 用缓存
+else { bindToConfigPackage(...); }                                  // 才会重新绑定
+```
+
+于是框架直接replay了缓存里的 `us`，**`onLoadConfig()` 再也没有被调用**，
+`restoreCountryIso = "cn"` 永远送不出去，`getSimCountryIso()` 卡在 `us`。
+
+这也解释了为什么 run #9 成功而 run #11 失败：缓存写入（`saveConfigToXml`）是异步的，
+run #9 的还原恰好赶在缓存落盘之前，属于侥幸。
+
+**修复**：新增 `PrivilegedTelephony.notifyConfigChangedAsSelf()`，**以本应用自身的 UID** 发起该调用
+（凭 carrier privileges 即可通过 `enforceCallingOrSelfModifyPermissionOrCarrierPrivilege`），
+使缓存清除命中我们自己的包，强制真正重新绑定。还原时还会核对
+`CarrierServiceBridge.invocationCount()` 是否真的增加 —— 即"框架确实又问了我们一次"。
+
+#### 缺陷二：APN/数据的假阳性
+
+旧实现把 `apn`、`data_state`、`data_validated` 一起做快照比较，任何差异都算受损。两类假阳性：
+
+1. **APN 读取权限差异**：事务期间有 carrier privileges 能读，结束后读不到 →
+   看起来像被改了，其实只是观测能力变化；
+2. **数据状态瞬时抖动**：电话重配期间 `CONNECTED → DISCONNECTED → CONNECTED` 是合法的，
+   蜂窝 `Network` 对象会被拆建，`NET_CAPABILITY_INTERNET` 会短暂翻转。
+   run #11 实际采到 `internet=false validated=true` —— 而 `validated=true` 恰恰说明数据是通的。
+
+**修复**：新增 `ApnDataSafety`。APN 只有"两次都读得到且值不同"才算改动；数据不再比较瞬时快照，
+而是给最多 20 秒的恢复窗口等它稳定，且**只有基线健康、最终仍不健康**才算本次事务造成的损坏。
+判定仍然保守 —— 真正的连通性失败照样检出。
+
+#### 关于"国家码专用 profile 不应调用 setCarrierTestOverride"
+
+无法做到，且原因是结构性的：成为 CarrierService 的前提是拥有 carrier privileges
+（`getCarrierService()` 要求包名在 `simPrivilegedPackages` 中），而授予 privileges 的唯一入口
+就是 `ITelephony.setCarrierTestOverride(..., carrierPrivilegeRules, ...)`。
+`PhoneInterfaceManager` 会把该调用同时转给 `CarrierPrivilegesTracker` 和 `IccRecords`，
+后者无条件写 `gsm.sim.operator.numeric` / `.alpha`，传 null 反而会**清空**它们。
+
+因此国家码专用 profile 传入的是**从 SIM 现场读到的真实值原样回填**：MCC/MNC 不发生任何变化。
+步骤文案已改为如实描述（"仅用于授予 carrier privileges …为真实值原样回填（不修改）"），
+并有回归测试保证该 profile 的 `touchedSignals()` 不含 `SIM_OPERATOR_NUMERIC`／`SIM_CARRIER_ID`，
+一旦 MCC/MNC 真的变了，会被清理阶段当作**意外副作用**报出。
+
 ### 会自动拒绝执行的情况
 
 若 `getCarrierServicePackageNameForLogicalSlot()` 返回了**别的**包名，探测按钮直接禁用。

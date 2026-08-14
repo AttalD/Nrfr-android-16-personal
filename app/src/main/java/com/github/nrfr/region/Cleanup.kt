@@ -115,10 +115,20 @@ object Cleanup {
         val configRestored =
             baseline.baselineConfigCountryKey?.lowercase() == postConfigKey?.lowercase()
 
-        // APN / data must be untouched. A value that merely became readable is not damage.
-        val apnIntact = comparisons.none {
-            it.key in APN_DATA_KEYS && it.outcome == ComparisonOutcome.CHANGED
-        }
+        // APN / data safety. Deliberately NOT a snapshot diff of data_state/data_validated:
+        // those legitimately flap while telephony reconfigures, and APN becomes unreadable again
+        // the moment carrier privileges are dropped. See ApnDataSafety for the reasoning.
+        val apnWasChanged = ApnDataSafety.apnChanged(comparisons)
+        val baselineHealth = if (before.isEmpty()) DataHealth.UNKNOWN
+        else ApnDataSafety.healthOf(before)
+        val finalHealth = ApnDataSafety.awaitHealthy(context, subId)
+        val apnIntact = !ApnDataSafety.isDamaged(apnWasChanged, baselineHealth, finalHealth)
+        steps += ProbeStep(
+            "⑨ APN / 数据连通性", apnIntact,
+            "APN ${if (apnWasChanged) "被改动" else "未改动"} · " +
+                    "数据 ${baselineHealth.label} → ${finalHealth.label}" +
+                    if (!apnIntact) "（判定为受损）" else "（正常）"
+        )
 
         steps += ProbeStep(
             "⑨ 最终快照核对", identityRestored && configRestored && unexpected.isEmpty(),
@@ -139,9 +149,6 @@ object Cleanup {
             notes = notes
         )
     }
-
-    /** 参与"APN/数据是否受损"判定的键。 */
-    private val APN_DATA_KEYS = setOf("apn", "data_state", "data_validated")
 
     private fun certHashOrNull(context: Context): String? =
         PrivilegedTelephony.ownCertSha256(context).firstOrNull()

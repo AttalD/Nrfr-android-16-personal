@@ -122,4 +122,48 @@ class RegionalProfileTest {
             Signal.IDENTITY_KEYS
         )
     }
+
+    // ------------------------------------- country-only scope / MCC-MNC isolation
+
+    @Test
+    fun `country-only profile must not touch MCC MNC or carrier id`() {
+        // Run #11 scope regression: the country-only transaction must confine itself to the SIM
+        // country. setCarrierTestOverride is still invoked — it is the only way to obtain carrier
+        // privileges — but with the SIM's real values, so nothing about MCC/MNC changes.
+        val p = RegionalProfile.countryOnly("us")
+        assertEquals(setOf(Signal.SIM_COUNTRY_ISO), p.touchedSignals())
+        assertNull("country-only must not carry an operator numeric", p.operatorNumeric)
+        assertNull("country-only must not carry an operator name", p.operatorName)
+        assertFalse(p.expectedChangeKeys().contains(Signal.SIM_OPERATOR_NUMERIC.key))
+        assertFalse(p.expectedChangeKeys().contains(Signal.SIM_CARRIER_ID.key))
+    }
+
+    @Test
+    fun `a changed MCC MNC during a country-only run is an unexpected side effect`() {
+        // Because SIM_OPERATOR_NUMERIC is not in expectedChangeKeys, the cleanup side-effect
+        // filter will flag it — which is exactly what we want if the scope ever leaks.
+        val expected = RegionalProfile.countryOnly("us").expectedChangeKeys()
+        assertFalse("sim_operator" in expected)
+    }
+
+    @Test
+    fun `country-only preset uses no experimental mechanism`() {
+        val preset = RegionalProfile.PRESETS.first { it.name.contains("美国（仅国家码）") }
+        assertFalse(preset.usesExperimentalMechanism())
+        assertNull(preset.operatorNumeric)
+    }
+
+    @Test
+    fun `the MCC MNC presets stay separate and experimental`() {
+        // MCC/MNC isolation: the experimental profiles must remain distinct entries, never folded
+        // into the country-only path.
+        val experimental = RegionalProfile.PRESETS.filter { it.operatorNumeric != null }
+        assertTrue("expected dedicated MCC/MNC presets", experimental.isNotEmpty())
+        experimental.forEach {
+            assertTrue("${it.name} must be flagged experimental", it.usesExperimentalMechanism())
+            assertTrue("${it.name} must touch the numeric signal", Signal.SIM_OPERATOR_NUMERIC in it.touchedSignals())
+        }
+        val countryOnly = RegionalProfile.PRESETS.filter { it.operatorNumeric == null }
+        countryOnly.forEach { assertFalse("${it.name} must stay non-experimental", it.usesExperimentalMechanism()) }
+    }
 }

@@ -80,6 +80,48 @@ object PrivilegedTelephony {
         carrierConfigLoader().notifyConfigChangedForSubId(subId)
     }
 
+    /**
+     * 同一个调用，但**以本应用自身的身份**发起，而不是经 Shizuku 以 shell 身份发起。
+     *
+     * This distinction is load-bearing and was the cause of a real rollback failure.
+     * `CarrierConfigLoader.notifyConfigChangedForSubId` clears the on-disk config cache of the
+     * **calling** package only:
+     *
+     * ```java
+     * String callingPackageName = mContext.getPackageManager().getNameForUid(Binder.getCallingUid());
+     * clearCachedConfigForPackage(callingPackageName);
+     * ```
+     *
+     * Called through Shizuku the caller is `com.android.shell`, so *our* cached bundle survives.
+     * `EVENT_DO_FETCH_CARRIER` then does `restoreConfigFromXml(<our package>, …)`, gets the stale
+     * bundle back, and **never binds us again** — `onLoadConfig()` is not called, so a changed
+     * value (such as pushing the baseline country back) can never reach the framework.
+     *
+     * Calling from our own process makes the cache clear target our package, forcing a real
+     * re-bind. Permitted because `enforceCallingOrSelfModifyPermissionOrCarrierPrivilege` accepts
+     * carrier privileges, which we hold for as long as we are registered.
+     */
+    fun notifyConfigChangedAsSelf(subId: Int) {
+        ICarrierConfigLoader.Stub.asInterface(carrierConfigBinder())
+            .notifyConfigChangedForSubId(subId)
+    }
+
+    /**
+     * 强制 CarrierConfig 重新向我们索取配置。
+     *
+     * Prefers the self-identity call (which actually invalidates our cache) and falls back to the
+     * shell path only if that is refused — the fallback cannot force a re-bind, so callers that
+     * depend on `onLoadConfig()` running must verify the outcome rather than assume it.
+     */
+    fun refreshCarrierConfig(subId: Int): Boolean {
+        runCatching { notifyConfigChangedAsSelf(subId) }
+            .onSuccess { return true }
+            .onFailure { Log.w(TAG, "self notify refused, falling back to shell: ${it.message}") }
+        runCatching { notifyConfigChanged(subId) }
+            .onFailure { Log.e(TAG, "shell notify failed too", it) }
+        return false
+    }
+
     // ---------------------------------------------- carrier service strategy
 
     /**
