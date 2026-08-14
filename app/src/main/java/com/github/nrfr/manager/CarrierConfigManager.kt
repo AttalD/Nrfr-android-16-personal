@@ -7,6 +7,7 @@ import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Log
 import com.github.nrfr.data.OverrideStore
+import com.github.nrfr.diag.CarrierServiceRelease
 import com.github.nrfr.diag.CountryIsoRestore
 import com.github.nrfr.diag.RestoreOutcome
 import com.github.nrfr.model.SimCardInfo
@@ -272,16 +273,19 @@ object CarrierConfigManager {
 
         OverrideStore.clear(context, subId)
 
-        runCatching {
-            PrivilegedTelephony.setCarrierServicePackageOverride(subId, null, context.packageName)
-        }.onFailure { errors += "carrierServiceOverride: ${it.message}" }
-
-        // Restore the SIM's own operator numeric / name, undoing any spoof.
+        // Restore the SIM's own operator numeric / name, undoing any spoof, and release the
+        // CarrierService binding — privileges first, then the override, verified by polling.
         val realMccMnc = PrivilegedTelephony.realMccMnc(context, subId)
         val realSpn = PrivilegedTelephony.realSpn(context, subId)
+        val slot = runCatching { SubscriptionManager.getSlotIndex(subId) }.getOrDefault(0)
         runCatching {
-            PrivilegedTelephony.clearCarrierPrivileges(subId, realMccMnc, realSpn)
-        }.onFailure { errors += "carrierPrivileges: ${it.message}" }
+            CarrierServiceRelease.release(context, slot, subId, realMccMnc, realSpn)
+        }.onSuccess { rel ->
+            if (!rel.released) {
+                errors += "CarrierService 仍被绑定为 ${rel.boundPackageAfter}；" +
+                        "可切换飞行模式或重启后再试"
+            }
+        }.onFailure { errors += "carrierServiceRelease: ${it.message}" }
 
         // Also drop any legacy override that an older Android may still be holding.
         runCatching { PrivilegedTelephony.overrideConfig(subId, null, true) }

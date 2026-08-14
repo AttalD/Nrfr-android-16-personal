@@ -53,6 +53,7 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     var experiment by remember { mutableStateOf<CountryOverrideResult?>(null) }
     var recoveryCountry by remember { mutableStateOf("cn") }
     var recoverySteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
+    var releaseSteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
 
     fun collect(sim: SimCardInfo) {
         scope.launch {
@@ -150,6 +151,27 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                     },
                     enabled = !busy,
                     onRun = { confirmExperiment = true }
+                )
+
+                ReleaseCard(
+                    boundPackage = r.existingCarrierServicePackage,
+                    ourPackage = context.packageName,
+                    steps = releaseSteps,
+                    enabled = !busy,
+                    onRun = {
+                        val sim = selected ?: return@ReleaseCard
+                        scope.launch {
+                            busy = true; busyLabel = "正在释放 CarrierService…"
+                            releaseSteps = withContext(Dispatchers.IO) {
+                                CarrierServiceRelease.release(context, sim.slot - 1, sim.subId).steps
+                            }
+                            report = withContext(Dispatchers.IO) {
+                                DiagnosticCollector.collect(context, sim.slot - 1, sim.subId)
+                                    .copy(probe = report?.probe)
+                            }
+                            busy = false
+                        }
+                    }
                 )
 
                 RecoveryCard(
@@ -355,6 +377,55 @@ private fun CountryExperimentCard(
                 enabled = enabled && report.probeIsSafe && country.length == 2,
                 modifier = Modifier.fillMaxWidth()
             ) { Text(if (result == null) "运行国家码实验" else "重新运行") }
+        }
+    }
+}
+
+/**
+ * 释放卡片：把本应用从 CarrierService 绑定中解除。
+ *
+ * Needed as a standalone action because a stranded binding blocks every subsequent probe: the
+ * safety precondition sees a CarrierService already bound and refuses to run.
+ */
+@Composable
+private fun ReleaseCard(
+    boundPackage: String?,
+    ourPackage: String,
+    steps: List<ProbeStep>,
+    enabled: Boolean,
+    onRun: () -> Unit
+) {
+    val stranded = boundPackage == ourPackage
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("释放 CarrierService", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (stranded)
+                    "⚠️ 本应用当前仍被绑定为 CarrierService，这会导致后续探测/实验被安全检查拒绝执行。"
+                else
+                    "当前绑定：${boundPackage ?: "(无)"}。用于清理残留绑定，可安全重复执行。",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (stranded) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "顺序：先撤销 carrier privileges，再清除 override，然后轮询确认框架真的已不再绑定。" +
+                        "不会改动 SIM 国家码、MCC/MNC 或 APN。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            steps.forEach { s ->
+                Text(
+                    "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = onRun,
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("释放 CarrierService") }
         }
     }
 }

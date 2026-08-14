@@ -134,14 +134,14 @@ object CarrierServiceProbe {
         } finally {
             // ---- 10. always revert ------------------------------------------------------
             CarrierServiceBridge.probeToken = null
+            // Verified release: privileges first, then the override, then poll. Leaving the
+            // binding in place would make the UI refuse the next probe.
             runCatching {
-                PrivilegedTelephony.setCarrierServicePackageOverride(subId, null, context.packageName)
-            }.onFailure { Log.e(TAG, "revert carrierServiceOverride failed", it) }
-            runCatching {
-                PrivilegedTelephony.clearCarrierPrivileges(subId, realMccMnc, realSpn)
-            }.onFailure { Log.e(TAG, "revert carrierPrivileges failed", it) }
+                CarrierServiceRelease.release(context, slot, subId, realMccMnc, realSpn)
+            }.onFailure { Log.e(TAG, "release failed", it) }
             runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
                 .onFailure { Log.e(TAG, "revert notify failed", it) }
+            CarrierServiceBridge.reset()
         }
     }
 

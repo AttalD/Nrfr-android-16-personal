@@ -114,6 +114,7 @@ object CountryOverrideExperiment {
         var comparisonsDuring: List<ValueComparison> = emptyList()
         var restoreOutcome = RestoreOutcome.ALREADY_CORRECT
         var registered = false
+        var releaseResult: ReleaseResult? = null
 
         CarrierServiceBridge.reset()
         CarrierServiceBridge.experimentCountryIso = iso
@@ -187,14 +188,17 @@ object CountryOverrideExperiment {
                 Log.i(TAG, "restore outcome=$restoreOutcome")
             }
 
-            runCatching {
-                PrivilegedTelephony.setCarrierServicePackageOverride(subId, null, context.packageName)
-            }.onFailure { Log.e(TAG, "unregister failed", it) }
-            runCatching {
-                PrivilegedTelephony.clearCarrierPrivileges(subId, realMccMnc, realSpn)
-            }.onFailure { Log.e(TAG, "clear privileges failed", it) }
-            runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
-                .onFailure { Log.e(TAG, "final notify failed", it) }
+            // Explicit, verified release: privileges first, then the override, then poll until
+            // the framework actually reports us unbound (the recompute is asynchronous).
+            releaseResult = runCatching {
+                CarrierServiceRelease.release(context, slot, subId, realMccMnc, realSpn)
+            }.getOrElse {
+                Log.e(TAG, "release threw", it)
+                ReleaseResult(
+                    listOf(ProbeStep("释放 CarrierService", false, describe(it))),
+                    CarrierServiceRelease.readBound(slot), released = false
+                )
+            }
             CarrierServiceBridge.reset()
         }
 
@@ -203,6 +207,14 @@ object CountryOverrideExperiment {
             "清理动作", restoreOutcome != RestoreOutcome.FAILED,
             "还原方式=${restoreOutcome.label}（把基线值 $simCountryBefore 主动推回，再移除该键）"
         )
+
+        releaseResult?.let { rel ->
+            steps += rel.steps
+            steps += ProbeStep(
+                "CarrierService 已释放", rel.released,
+                "框架报告绑定 = ${rel.boundPackageAfter ?: "(无)"}"
+            )
+        }
 
         val postCleanupConfigKey = CountryIsoRestore.readConfigCountry(context, subId)
         val after = DiagnosticCollector.collectAll(context, subId)
@@ -238,6 +250,8 @@ object CountryOverrideExperiment {
             originalConfigKey = originalConfigKey,
             postCleanupConfigKey = postCleanupConfigKey,
             restoreOutcome = restoreOutcome,
+            carrierServiceReleased = releaseResult?.released ?: true,
+            boundPackageAfter = releaseResult?.boundPackageAfter,
             comparisonsDuring = comparisonsDuring,
             comparisonsAfter = comparisonsAfter
         )

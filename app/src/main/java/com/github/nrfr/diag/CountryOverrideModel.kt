@@ -44,6 +44,10 @@ data class CountryOverrideResult(
     /** 清理后 CarrierConfig 中该键的状态；应与 [originalConfigKey] 相同。 */
     val postCleanupConfigKey: String? = null,
     val restoreOutcome: RestoreOutcome = RestoreOutcome.NO_BASELINE,
+    /** 清理后框架是否已不再把本应用绑定为 CarrierService。 */
+    val carrierServiceReleased: Boolean = true,
+    /** 清理后框架报告的绑定包名；null 表示无绑定。 */
+    val boundPackageAfter: String? = null,
     /** 实验前 → 实验中 的逐项对比。 */
     val comparisonsDuring: List<ValueComparison> = emptyList(),
     /** 实验前 → 还原后 的逐项对比（还原是否干净）。 */
@@ -109,9 +113,14 @@ data class CountryOverrideResult(
 
     val revertFailures: List<ValueComparison> get() = comparisonsAfter.filter { it.isMutation }
 
-    /** 三重条件：对外值、配置键、以及全部身份键都必须回到原状。 */
+    /**
+     * 四重条件：对外值、配置键、全部身份键，以及 CarrierService 绑定都必须回到原状。
+     *
+     * 绑定没释放会让下一次探测被 UI 拒绝执行（安全前置检查会看到已有绑定），
+     * 因此它同样属于「没清理干净」。
+     */
     val fullyRestored: Boolean
-        get() = simCountryRestored && configKeyRestored && revertRestored
+        get() = simCountryRestored && configKeyRestored && revertRestored && carrierServiceReleased
 
     /**
      * 整个实验是否达到了「只改了国家码、别的都没动、且已完全还原」的理想结果。

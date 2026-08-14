@@ -148,12 +148,13 @@ object CountryIsoRestore {
             steps += ProbeStep("恢复过程异常", false, "${t.javaClass.simpleName}: ${t.message}")
         } finally {
             if (registered) {
-                runCatching {
-                    PrivilegedTelephony.setCarrierServicePackageOverride(
-                        subId, null, context.packageName
-                    )
-                }
-                runCatching { PrivilegedTelephony.clearCarrierPrivileges(subId, realMccMnc, realSpn) }
+                val rel = runCatching {
+                    CarrierServiceRelease.release(context, slot, subId, realMccMnc, realSpn)
+                }.getOrNull()
+                steps += ProbeStep(
+                    "释放 CarrierService", rel?.released == true,
+                    "框架报告绑定 = ${rel?.boundPackageAfter ?: "(无)"}"
+                )
                 runCatching { PrivilegedTelephony.notifyConfigChanged(subId) }
             }
             CarrierServiceBridge.reset()

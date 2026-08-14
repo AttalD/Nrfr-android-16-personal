@@ -300,6 +300,45 @@ if (!TextUtils.isEmpty(iso)
 - 同样的缺陷存在于主界面的「还原设置」，已一并修复：首次覆盖前会把真实国家码记入
   `OverrideStore.rememberOriginalCountry()`，还原时主动推回。
 
+### 4.8 CarrierService 绑定未释放（run #9）
+
+run #9 国家码已正确还原为 `cn`，但框架仍报告 `com.github.nrfr` 被绑定为 CarrierService，
+导致下一次探测被安全前置检查拒绝。
+
+#### 根因
+
+**顺序**。`CarrierPrivilegesTracker.getCarrierService()`：
+
+```java
+if (mTestOverrideCarrierServicePackage != null
+        && !mTestOverrideCarrierServicePackage.equals(packageName)) continue;
+if (simPrivilegedPackages.contains(packageName)) { carrierServicePackageName = packageName; break; }
+```
+
+先清 `mTestOverrideCarrierServicePackage` 会让那道 `continue` 过滤器消失，而此刻
+`mTestOverrideRules` 尚未清除 —— 我们**仍然持有 carrier privileges**，且本应用在 manifest 中
+确实声明了 `CarrierService`。于是这一次重算把我们选成了"普通的"运营商服务。
+
+**异步**。`setTestOverrideCarrierPrivilegeRules()` / `setTestOverrideCarrierServicePackage()`
+都是 `mCurrentHandler.sendMessage(...)`，重算在 CPT 的 handler 线程上完成。
+调用返回后立即读 `getCarrierServicePackageNameForLogicalSlot()` 得到的是**尚未更新的缓存**
+（`mPrivilegedPackageInfo.mCarrierService.first`）。
+
+#### 修复
+
+新增 [`CarrierServiceRelease`](../app/src/main/java/com/github/nrfr/diag/CarrierServiceRelease.kt)：
+
+1. **先**撤销 carrier privileges（`mTestOverrideRules = null`）；
+2. **再**清除 CarrierService override —— 最后一次重算发生在我们已不具备资格之后；
+3. `notifyConfigChangedForSubId`；
+4. **轮询** `getCarrierServicePackageNameForLogicalSlot()` 直到不再是本应用（最多 8 秒）；
+5. 未成功则整体重试，最多 3 次。
+
+该操作幂等，已接入所有清理路径：哨兵探测、国家码实验、主界面「还原设置」、强制恢复。
+实验判定新增第四个条件 `carrierServiceReleased` —— 绑定没释放同样算"没清理干净"。
+
+诊断界面新增「**释放 CarrierService**」卡片，可随时单独执行。
+
 #### 已经被卡住的设备怎么办
 
 1. **切换飞行模式约 10 秒**（最简单，不需要本应用）——

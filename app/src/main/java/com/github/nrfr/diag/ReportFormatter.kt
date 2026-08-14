@@ -154,6 +154,9 @@ object ReportFormatter {
         appendLine(">>> 结论: ${r.verdict.label}")
         appendLine(">>> 还原: ${if (r.revertRestored) "已完全还原 ✅" else "存在未还原的值 ❌"}" +
                 " (SIM 国家码现为 ${r.simCountryAfter ?: "?"})")
+        appendLine(">>> CarrierService 释放: ${if (r.carrierServiceReleased) "已释放 ✅" else "仍被绑定 ❌"}" +
+                " (框架报告绑定 = ${r.boundPackageAfter ?: "无"})")
+        appendLine(">>> 整体清理: ${if (r.fullyRestored) "干净 ✅" else "不干净 ❌"}")
         if (r.unexpectedSideEffects.isNotEmpty()) {
             appendLine("⚠️ 意外副作用:")
             r.unexpectedSideEffects.forEach { appendLine("  ${describe(it)}") }
