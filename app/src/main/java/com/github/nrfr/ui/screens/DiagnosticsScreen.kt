@@ -51,6 +51,8 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
     var confirmExperiment by remember { mutableStateOf(false) }
     var experimentCountry by remember { mutableStateOf(CountryOverrideExperiment.DEFAULT_TEST_COUNTRY) }
     var experiment by remember { mutableStateOf<CountryOverrideResult?>(null) }
+    var recoveryCountry by remember { mutableStateOf("cn") }
+    var recoverySteps by remember { mutableStateOf<List<ProbeStep>>(emptyList()) }
 
     fun collect(sim: SimCardInfo) {
         scope.launch {
@@ -148,6 +150,33 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                     },
                     enabled = !busy,
                     onRun = { confirmExperiment = true }
+                )
+
+                RecoveryCard(
+                    target = recoveryCountry,
+                    onTargetChange = { input ->
+                        if (input.length <= 2 && input.all { it.isLetter() }) {
+                            recoveryCountry = input.lowercase()
+                        }
+                    },
+                    steps = recoverySteps,
+                    enabled = !busy && recoveryCountry.length == 2,
+                    onRun = {
+                        val sim = selected ?: return@RecoveryCard
+                        scope.launch {
+                            busy = true; busyLabel = "正在恢复 SIM 国家码…"
+                            recoverySteps = withContext(Dispatchers.IO) {
+                                CountryIsoRestore.forceRestore(
+                                    context, sim.slot - 1, sim.subId, recoveryCountry
+                                )
+                            }
+                            report = withContext(Dispatchers.IO) {
+                                DiagnosticCollector.collect(context, sim.slot - 1, sim.subId)
+                                    .copy(probe = report?.probe)
+                            }
+                            busy = false
+                        }
+                    }
                 )
 
                 OutlinedButton(
@@ -326,6 +355,55 @@ private fun CountryExperimentCard(
                 enabled = enabled && report.probeIsSafe && country.length == 2,
                 modifier = Modifier.fillMaxWidth()
             ) { Text(if (result == null) "运行国家码实验" else "重新运行") }
+        }
+    }
+}
+
+/**
+ * 恢复卡片：把 SIM 国家码强制写回指定值。
+ *
+ * The property is one-way — removing the override does not undo it — so a device left on the
+ * wrong country needs the correct value written again deliberately.
+ */
+@Composable
+private fun RecoveryCard(
+    target: String,
+    onTargetChange: (String) -> Unit,
+    steps: List<ProbeStep>,
+    enabled: Boolean,
+    onRun: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("恢复 SIM 国家码", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "若 SIM 国家码被留在了错误的值上，用这里把它写回去。\n" +
+                        "提示：切换飞行模式约 10 秒、或重启手机，同样能让系统从 SIM 的 IMSI 重新读取真实国家码，" +
+                        "且完全不需要本应用。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = target,
+                onValueChange = onTargetChange,
+                label = { Text("目标国家码（原值，通常为 cn）") },
+                singleLine = true,
+                isError = target.length != 2,
+                modifier = Modifier.fillMaxWidth()
+            )
+            steps.forEach { s ->
+                Text(
+                    "${if (s.ok) "✅" else "❌"} ${s.name}${s.detail?.let { " — $it" } ?: ""}",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRun,
+                enabled = enabled,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("恢复为 $target") }
         }
     }
 }

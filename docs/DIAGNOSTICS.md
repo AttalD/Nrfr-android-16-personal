@@ -247,6 +247,66 @@ network_operator, network_operator_name, network_country_iso, network_roaming
 
 还原同样在 `finally` 中无条件执行，并会再次逐项对比以确认国家码已回到 `cn`。
 
+### 4.7 回滚缺陷的根因（run #8）与修复
+
+run #8 在真机上覆盖成功（`cn` → `us`），但**清理后国家码卡在 `us`**。根因有两条，都在
+AOSP 源码里可以直接看到。
+
+#### 根因一：框架没有"取消覆盖"这条路径
+
+`UiccProfile.handleSimCountryIsoOverride()`：
+
+```java
+String iso = config.getString(KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING);
+if (!TextUtils.isEmpty(iso)
+        && !iso.equals(TelephonyManager.getSimCountryIsoForPhone(mPhoneId))) {
+    mTelephonyManager.setSimCountryIsoForPhone(mPhoneId, iso);
+    SubscriptionManagerService.getInstance().setCountryIso(subId, iso);
+}
+```
+
+键被移除后 `iso` 为空 → `!TextUtils.isEmpty(iso)` 为假 → **整个分支被跳过**。
+`gsm.sim.operator.iso-country` 保持上一次写入的值。
+
+全框架只有三处会写这个属性：
+
+| 位置 | 触发时机 |
+| --- | --- |
+| `UiccProfile.handleSimCountryIsoOverride()` | 覆盖值非空时 |
+| `SIMRecords.onAllRecordsLoaded()` | SIM 记录重新加载（重启 / 飞行模式 / 重新插卡）→ 由 IMSI 前 3 位查 `MccTable` |
+| `SIMRecords.onRadioOffOrNotAvailable()` / `UiccProfile.resetProperties()` | 置为 `""` |
+
+所以**移除键是单向的 no-op**，必须主动把原值再推一次。
+
+#### 根因二：清理顺序与测量时机都错了
+
+1. 旧代码先 `setCarrierServicePackageOverride(subId, null, …)` 解除注册 —— 框架从此不再向我们
+   索取配置，也就再没有机会推回原值；
+2. `finish()` 写在 `try` 的 `return` 表达式里，而清理在 `finally` —— 因此"事后"数据实际是在
+   清理**之前**采集的，报告里的"还原"一栏测的其实是实验中状态。
+   （这也解释了上一轮 `data_network_type` 为何在"事后"仍可读：当时仍持有 carrier privileges。）
+
+#### 修复
+
+- 新增 [`CountryIsoRestore`](../app/src/main/java/com/github/nrfr/diag/CountryIsoRestore.kt)：
+  **在仍然注册为 CarrierService 的状态下**把基线值推回去，等 `getSimCountryIso()` 真的变回来，
+  再移除该键；
+- 清理改为在 `finally` 中完整执行，**测量移到 `try/finally` 之后**；
+- 实验前记录 CarrierConfig 中该键的**原始状态**（可能是"不存在"），
+  清理后逐项核对，绝不硬编码 `cn`；
+- 读不到基线时**直接拒绝实验**，而不是事后无法还原；
+- 判定改为三重条件：`getSimCountryIso()` 已还原 **且** 配置键回到原始状态 **且** 全部身份键一致。
+  覆盖生效但没还原干净 **不算成功**；
+- 同样的缺陷存在于主界面的「还原设置」，已一并修复：首次覆盖前会把真实国家码记入
+  `OverrideStore.rememberOriginalCountry()`，还原时主动推回。
+
+#### 已经被卡住的设备怎么办
+
+1. **切换飞行模式约 10 秒**（最简单，不需要本应用）——
+   `SIMRecords.onAllRecordsLoaded()` 会从 IMSI 重新解析真实国家码；
+2. 或重启手机；
+3. 或用诊断界面的「恢复 SIM 国家码」卡片，填入原值（通常 `cn`）后执行。
+
 ### 会自动拒绝执行的情况
 
 若 `getCarrierServicePackageNameForLogicalSlot()` 返回了**别的**包名，探测按钮直接禁用。

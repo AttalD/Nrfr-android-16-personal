@@ -20,6 +20,28 @@ object CarrierServiceBridge {
      * That is what makes the probe identity-neutral: we prove the framework fetches and applies
      * our bundle without putting a single real telephony value in it.
      */
+    /**
+     * 还原模式：优先级最高，服务只下发这一个国家码。
+     *
+     * Load-bearing, and the fix for a real rollback bug. `UiccProfile.handleSimCountryIsoOverride()`
+     * writes `gsm.sim.operator.iso-country` **only when the override value is non-empty**:
+     *
+     * ```java
+     * if (!TextUtils.isEmpty(iso) && !iso.equals(getSimCountryIsoForPhone(mPhoneId))) {
+     *     mTelephonyManager.setSimCountryIsoForPhone(mPhoneId, iso);
+     * }
+     * ```
+     *
+     * So *removing* the key is a no-op — the property keeps the last value we wrote. There is no
+     * un-apply path in the framework; the only writers that would restore it are
+     * `SIMRecords.onAllRecordsLoaded()` (SIM re-init / reboot) and `resetProperties()`.
+     *
+     * Restoring therefore means **actively pushing the original value back through the same
+     * override**, waiting for it to land, and only then dropping the key.
+     */
+    @Volatile
+    var restoreCountryIso: String? = null
+
     @Volatile
     var probeToken: String? = null
 
@@ -46,6 +68,7 @@ object CarrierServiceBridge {
     fun invocationCount(): Int = invocations.get()
 
     fun reset() {
+        restoreCountryIso = null
         probeToken = null
         experimentCountryIso = null
         lastSubId = -1

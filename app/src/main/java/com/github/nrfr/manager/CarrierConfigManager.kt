@@ -7,6 +7,8 @@ import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Log
 import com.github.nrfr.data.OverrideStore
+import com.github.nrfr.diag.CountryIsoRestore
+import com.github.nrfr.diag.RestoreOutcome
 import com.github.nrfr.model.SimCardInfo
 import com.github.nrfr.service.NrfrCarrierService
 
@@ -145,6 +147,13 @@ object CarrierConfigManager {
     fun apply(context: Context, subId: Int, spec: OverrideSpec): ApplyResult {
         if (spec.isEmpty) return revert(context, subId)
 
+        // Record the genuine pre-override country BEFORE touching anything. The framework has no
+        // un-apply path for the country key, so reverting means pushing this exact value back —
+        // and there is no second chance to observe it once we have overridden it.
+        OverrideStore.rememberOriginalCountry(
+            context, subId, CountryIsoRestore.readSimCountry(context, subId)
+        )
+
         // Persist first: the framework may call back into NrfrCarrierService as soon as we
         // register, and the store is what that callback reads.
         OverrideStore.put(context, subId, spec)
@@ -234,12 +243,34 @@ object CarrierConfigManager {
      * and we restore the real MCC/MNC and SPN explicitly here.
      */
     fun revert(context: Context, subId: Int): ApplyResult {
-        // Clear the store first: if the framework calls NrfrCarrierService while we unwind, it
-        // must get an empty bundle rather than the old override.
         val previous = runCatching { OverrideStore.get(context, subId) }.getOrDefault(OverrideSpec())
-        OverrideStore.clear(context, subId)
+        val originalCountry = runCatching { OverrideStore.originalCountry(context, subId) }.getOrNull()
+
+        // Stop serving the override, but stay registered for now.
+        OverrideStore.put(context, subId, OverrideSpec())
 
         val errors = mutableListOf<String>()
+
+        // Push the original country back *before* unregistering. `handleSimCountryIsoOverride()`
+        // only writes when the value is non-empty, so simply dropping the key would leave
+        // `gsm.sim.operator.iso-country` stuck at the overridden value — the run #8 rollback bug.
+        if (previous.countryIso != null) {
+            when (val outcome = runCatching {
+                CountryIsoRestore.restore(context, subId, originalCountry)
+            }.getOrElse {
+                Log.e(TAG, "country restore threw", it); RestoreOutcome.FAILED
+            }) {
+                RestoreOutcome.FAILED ->
+                    errors += "国家码未能还原（当前 ${CountryIsoRestore.readSimCountry(context, subId)}）"
+
+                RestoreOutcome.NO_BASELINE ->
+                    errors += "没有记录到原始国家码，无法自动还原；重启或切换飞行模式可恢复"
+
+                else -> Log.i(TAG, "country restore: $outcome")
+            }
+        }
+
+        OverrideStore.clear(context, subId)
 
         runCatching {
             PrivilegedTelephony.setCarrierServicePackageOverride(subId, null, context.packageName)

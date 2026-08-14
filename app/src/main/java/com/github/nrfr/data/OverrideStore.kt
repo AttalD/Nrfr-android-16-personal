@@ -17,6 +17,7 @@ object OverrideStore {
     private const val KEY_COUNTRY = "country_"
     private const val KEY_CARRIER = "carrier_"
     private const val KEY_MCCMNC = "mccmnc_"
+    private const val KEY_ORIGINAL_COUNTRY = "orig_country_"
     private const val KEY_SUBS = "subs"
 
     private fun prefs(context: Context) =
@@ -55,7 +56,34 @@ object OverrideStore {
         }.apply()
     }
 
-    fun clear(context: Context, subId: Int) = put(context, subId, OverrideSpec())
+    /**
+     * 记录**首次**覆盖之前的真实 SIM 国家码。
+     *
+     * Required because the framework has no un-apply path for
+     * `KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING`: removing the key leaves
+     * `gsm.sim.operator.iso-country` at whatever was last written, so reverting means actively
+     * pushing this value back. Only written once, so re-applying a new country never overwrites
+     * the genuine original.
+     */
+    fun rememberOriginalCountry(context: Context, subId: Int, iso: String?) {
+        if (iso.isNullOrBlank()) return
+        val p = prefs(context)
+        val key = "$KEY_ORIGINAL_COUNTRY$subId"
+        if (p.contains(key)) return
+        p.edit().putString(key, iso.lowercase()).apply()
+    }
+
+    fun originalCountry(context: Context, subId: Int): String? =
+        prefs(context).getString("$KEY_ORIGINAL_COUNTRY$subId", null)
+
+    private fun forgetOriginalCountry(context: Context, subId: Int) {
+        prefs(context).edit().remove("$KEY_ORIGINAL_COUNTRY$subId").apply()
+    }
+
+    fun clear(context: Context, subId: Int) {
+        put(context, subId, OverrideSpec())
+        forgetOriginalCountry(context, subId)
+    }
 
     /** Subscription ids that currently have a non-empty override, used on boot re-apply. */
     fun configuredSubIds(context: Context): List<Int> =

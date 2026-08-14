@@ -39,6 +39,11 @@ data class CountryOverrideResult(
     val simCountryBefore: String? = null,
     val simCountryDuring: String? = null,
     val simCountryAfter: String? = null,
+    /** 实验前 CarrierConfig 中该键的原始状态；null 表示原本不存在。 */
+    val originalConfigKey: String? = null,
+    /** 清理后 CarrierConfig 中该键的状态；应与 [originalConfigKey] 相同。 */
+    val postCleanupConfigKey: String? = null,
+    val restoreOutcome: RestoreOutcome = RestoreOutcome.NO_BASELINE,
     /** 实验前 → 实验中 的逐项对比。 */
     val comparisonsDuring: List<ValueComparison> = emptyList(),
     /** 实验前 → 还原后 的逐项对比（还原是否干净）。 */
@@ -85,14 +90,36 @@ data class CountryOverrideResult(
     val unexpectedSideEffects: List<ValueComparison>
         get() = comparisonsDuring.filter { it.isMutation && it.key !in EXPECTED_CHANGE_KEYS }
 
-    /** 还原后是否所有身份键（含 SIM 国家码）都回到了原值。 */
+    /**
+     * 对外可见的值是否已还原 —— 以 `getSimCountryIso()` 为准，而不是只看 CarrierConfig。
+     *
+     * This is the check that the run #8 bug slipped past: the config bundle no longer carried the
+     * key, yet the property still read "us".
+     */
+    val simCountryRestored: Boolean
+        get() = simCountryBefore != null && simCountryAfter != null &&
+                simCountryAfter.equals(simCountryBefore, ignoreCase = true)
+
+    /** CarrierConfig 中该键是否回到了原始状态（原本不存在则应仍不存在）。 */
+    val configKeyRestored: Boolean
+        get() = originalConfigKey?.lowercase() == postCleanupConfigKey?.lowercase()
+
+    /** 还原后是否所有身份键都回到了原值。 */
     val revertRestored: Boolean get() = comparisonsAfter.none { it.isMutation }
 
     val revertFailures: List<ValueComparison> get() = comparisonsAfter.filter { it.isMutation }
 
-    /** 整个实验是否达到了「只改了国家码、别的都没动、且已还原」的理想结果。 */
+    /** 三重条件：对外值、配置键、以及全部身份键都必须回到原状。 */
+    val fullyRestored: Boolean
+        get() = simCountryRestored && configKeyRestored && revertRestored
+
+    /**
+     * 整个实验是否达到了「只改了国家码、别的都没动、且已完全还原」的理想结果。
+     *
+     * 覆盖生效但没还原干净 **不算成功** —— 这正是 run #8 的教训。
+     */
     val cleanSuccess: Boolean
         get() = verdict == OverrideVerdict.EFFECTIVE &&
                 unexpectedSideEffects.isEmpty() &&
-                revertRestored
+                fullyRestored
 }

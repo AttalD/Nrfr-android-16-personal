@@ -45,6 +45,15 @@ class NrfrCarrierService : CarrierService() {
 
         // Diagnostics probe: serve only the sentinel token, so the round trip can be proven
         // without putting any real telephony value into the config.
+        // Highest precedence: a restore in progress must win over everything else, including a
+        // persisted user override, or cleanup could never push the original value back.
+        CarrierServiceBridge.restoreCountryIso?.let { iso ->
+            Log.i(TAG, "onLoadConfig(subId=$subscriptionId) -> RESTORE country=$iso")
+            return PersistableBundle().apply {
+                putString(CarrierConfigKeys.KEY_SIM_COUNTRY_ISO, iso)
+            }
+        }
+
         CarrierServiceBridge.probeToken?.let { token ->
             Log.i(TAG, "onLoadConfig(subId=$subscriptionId) -> PROBE token")
             return PersistableBundle().apply {
