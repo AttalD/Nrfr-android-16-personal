@@ -34,7 +34,8 @@ class RegionalProfileTest {
         val p = RegionalProfile("x", operatorNumeric = "310260")
         assertTrue(p.touchedSignals().contains(Signal.SIM_OPERATOR_NUMERIC))
         assertTrue(p.touchedSignals().contains(Signal.SIM_CARRIER_ID))
-        assertTrue(p.usesExperimentalMechanism())
+        // Carrier ID stays READ_ONLY: we never write it, it only follows the operator numeric.
+        assertEquals(SignalStatus.READ_ONLY, SignalCapabilities[Signal.SIM_CARRIER_ID].status)
     }
 
     @Test
@@ -63,8 +64,11 @@ class RegionalProfileTest {
     }
 
     @Test
-    fun `at least one preset avoids experimental mechanisms entirely`() {
-        assertTrue(RegionalProfile.PRESETS.any { !it.usesExperimentalMechanism() })
+    fun `no preset relies on an unverified mechanism any more`() {
+        // After runs #13/#14 every signal these presets touch is hardware-verified.
+        RegionalProfile.PRESETS.forEach {
+            assertFalse("${it.name} should no longer be experimental", it.usesExperimentalMechanism())
+        }
     }
 
     // ------------------------------------------------------------ capabilities
@@ -93,7 +97,9 @@ class RegionalProfileTest {
         // CARRIER_NAME, SPDI, EHPLMN, PNN and OPL have *_OVERRIDE_* keys. Getting this wrong would
         // mean silently shipping a mechanism that cannot work.
         assertEquals(Mechanism.CARRIER_TEST_OVERRIDE, Signal.SIM_OPERATOR_NUMERIC.mechanism)
-        assertEquals(SignalStatus.EXPERIMENTAL, SignalCapabilities[Signal.SIM_OPERATOR_NUMERIC].status)
+        // Verified on hardware in runs #13/#14 — but still NOT via CarrierConfig, which is the
+        // point of this test. Status and mechanism are independent claims.
+        assertEquals(SignalStatus.VERIFIED, SignalCapabilities[Signal.SIM_OPERATOR_NUMERIC].status)
     }
 
     @Test
@@ -154,16 +160,19 @@ class RegionalProfileTest {
     }
 
     @Test
-    fun `the MCC MNC presets stay separate and experimental`() {
-        // MCC/MNC isolation: the experimental profiles must remain distinct entries, never folded
-        // into the country-only path.
-        val experimental = RegionalProfile.PRESETS.filter { it.operatorNumeric != null }
-        assertTrue("expected dedicated MCC/MNC presets", experimental.isNotEmpty())
-        experimental.forEach {
-            assertTrue("${it.name} must be flagged experimental", it.usesExperimentalMechanism())
+    fun `the MCC MNC presets stay separate profiles`() {
+        // MCC/MNC isolation: these must remain distinct entries, never folded into the
+        // country-only path — that stays true now that the mechanism is hardware-verified.
+        val withNumeric = RegionalProfile.PRESETS.filter { it.operatorNumeric != null }
+        assertTrue("expected dedicated MCC/MNC presets", withNumeric.isNotEmpty())
+        withNumeric.forEach {
             assertTrue("${it.name} must touch the numeric signal", Signal.SIM_OPERATOR_NUMERIC in it.touchedSignals())
+            assertTrue("${it.name} must also touch the derived carrier id", Signal.SIM_CARRIER_ID in it.touchedSignals())
         }
         val countryOnly = RegionalProfile.PRESETS.filter { it.operatorNumeric == null }
-        countryOnly.forEach { assertFalse("${it.name} must stay non-experimental", it.usesExperimentalMechanism()) }
+        countryOnly.forEach {
+            assertNull("${it.name} must not carry a numeric", it.operatorNumeric)
+            assertFalse(Signal.SIM_OPERATOR_NUMERIC in it.touchedSignals())
+        }
     }
 }

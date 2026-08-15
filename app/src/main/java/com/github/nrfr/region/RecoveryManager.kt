@@ -33,11 +33,24 @@ object RecoveryManager {
 
     private const val TAG = "Nrfr/Recovery"
 
-    fun hasPendingWork(context: Context): Boolean = TransactionJournal.hasOpen(context)
+    /**
+     * 是否存在**真正孤立**的事务需要补完回滚。
+     *
+     * A persistent profile in [ProfileState.ACTIVE] is an open journal entry by design — that is
+     * how a reboot or process death can still be reconciled. It is emphatically *not* an
+     * interrupted experiment, so it must never raise the recovery banner or be offered a
+     * "finish the rollback" action. Only genuinely orphaned records qualify.
+     */
+    fun hasPendingWork(context: Context): Boolean = orphaned(context).isNotEmpty()
 
-    /** 处理所有未闭合的事务。 */
+    /** 孤立的事务记录：ACTIVE 属于正常持久状态，排除在外。 */
+    fun orphaned(context: Context): List<OpenTransaction> =
+        TransactionJournal.openTransactions(context)
+            .filter { it.state != ProfileState.ACTIVE }
+
+    /** 处理所有**孤立**的事务。 */
     fun recoverAll(context: Context): List<RecoveryOutcome> =
-        TransactionJournal.openTransactions(context).map { recover(context, it) }
+        orphaned(context).map { recover(context, it) }
 
     fun recover(context: Context, tx: OpenTransaction): RecoveryOutcome {
         val steps = mutableListOf<ProbeStep>()

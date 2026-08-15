@@ -6,7 +6,8 @@ import android.content.Intent
 import android.util.Log
 import com.github.nrfr.data.OverrideStore
 import com.github.nrfr.manager.CarrierConfigManager
-import com.github.nrfr.region.RecoveryManager
+import com.github.nrfr.region.ProfileManager
+import com.github.nrfr.region.TransactionJournal
 
 /**
  * 开机后尝试重新应用配置。
@@ -27,12 +28,13 @@ class BootReceiver : BroadcastReceiver() {
             intent.action != Intent.ACTION_LOCKED_BOOT_COMPLETED
         ) return
 
-        // A reboot clears the in-memory privileged state, but the journal may still record an
-        // unfinished transaction; reconcile it before anything else.
-        if (RecoveryManager.hasPendingWork(context)) {
-            runCatching { RecoveryManager.recoverAll(context) }
-                .onSuccess { Log.i(TAG, "boot recovery: ${it.map { o -> o.recovered }}") }
-                .onFailure { Log.i(TAG, "boot recovery not possible yet: ${it.message}") }
+        // A reboot clears every in-memory privileged override, so a record left in ACTIVE is not
+        // an error — it simply describes a state that no longer exists. Reconcile each record
+        // against the framework (which closes those cleanly) rather than blindly "rolling back".
+        TransactionJournal.openTransactions(context).forEach { tx ->
+            runCatching { ProfileManager.reconcile(context, tx.slot, tx.subId) }
+                .onSuccess { Log.i(TAG, "boot reconcile subId=${tx.subId} -> $it") }
+                .onFailure { Log.i(TAG, "boot reconcile not possible yet: ${it.message}") }
         }
 
         if (OverrideStore.configuredSubIds(context).isEmpty()) return

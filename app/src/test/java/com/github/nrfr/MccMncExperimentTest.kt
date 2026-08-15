@@ -70,10 +70,12 @@ class MccMncExperimentTest {
     // ------------------------------------------------------------ profile shape
 
     @Test
-    fun `the T-Mobile preset targets 310260 and stays experimental`() {
+    fun `the T-Mobile preset targets 310260 and is now hardware-verified`() {
         assertEquals("310260", profile.operatorNumeric)
         assertEquals("us", profile.countryIso)
-        assertTrue(profile.usesExperimentalMechanism())
+        assertEquals("T-Mobile", profile.operatorName)
+        // Runs #13/#14 moved this from EXPERIMENTAL to VERIFIED on the real device.
+        assertFalse(profile.usesExperimentalMechanism())
         assertTrue(profile.validate().isEmpty())
     }
 
@@ -85,6 +87,8 @@ class MccMncExperimentTest {
             Mechanism.CARRIER_TEST_OVERRIDE,
             SignalCapabilities[Signal.SIM_OPERATOR_NUMERIC].signal.mechanism
         )
+        // Verified status must never be read as "it goes through CarrierConfig".
+        assertEquals(SignalStatus.VERIFIED, SignalCapabilities[Signal.SIM_OPERATOR_NUMERIC].status)
     }
 
     @Test

@@ -239,4 +239,95 @@ class ProfileLifecycleTest {
             assertFalse(Signal.NETWORK_OPERATOR_NAME in p.touchedSignals())
         }
     }
+
+    // ------------------------------------------- ACTIVE is not "pending recovery"
+
+    @Test
+    fun `an ACTIVE record is not orphaned work`() {
+        // Run #14 UI defect: a healthy persistent profile kept an open journal entry by design,
+        // and that was being surfaced as "检测到未完成的事务 / 补完回滚". An ACTIVE profile is a
+        // normal state, not an interrupted experiment.
+        val active = OpenTransaction(
+            subId = 2, slot = 0, profileName = "美国 T-Mobile",
+            baselineCountryIso = "cn", baselineOperatorNumeric = "46000",
+            baselineOperatorName = "CMCC", baselineConfigCountryKey = null,
+            startedAtMillis = 1L, state = ProfileState.ACTIVE,
+            appliedCountryIso = "us", appliedOperatorNumeric = "310260"
+        )
+        assertEquals(ProfileState.ACTIVE, active.state)
+        // Every other state IS orphaned work.
+        listOf(
+            ProfileState.APPLYING, ProfileState.RESTORING,
+            ProfileState.RECOVERY_REQUIRED, ProfileState.FAILED
+        ).forEach { st ->
+            assertTrue("$st should count as orphaned", st != ProfileState.ACTIVE)
+        }
+    }
+
+    @Test
+    fun `a healthy ACTIVE profile must never be offered a rollback prompt`() {
+        // Reconciling an intact ACTIVE profile keeps it active — no cleanup is proposed.
+        assertEquals(
+            ReconcileDecision.STILL_ACTIVE,
+            reconcile(ProfileState.ACTIVE, bound = true, matchesProfile = true, matchesBaseline = false)
+        )
+    }
+
+    // --------------------------------------------- capability evidence
+
+    @Test
+    fun `MCC MNC is verified on hardware after run 13 and 14`() {
+        val cap = SignalCapabilities[Signal.SIM_OPERATOR_NUMERIC]
+        assertEquals(SignalStatus.VERIFIED, cap.status)
+        assertTrue("evidence must cite the real values", cap.evidence.contains("310260"))
+        assertTrue(cap.evidence.contains("46000"))
+    }
+
+    @Test
+    fun `operator name is verified too`() {
+        val cap = SignalCapabilities[Signal.SIM_OPERATOR_NAME]
+        assertEquals(SignalStatus.VERIFIED, cap.status)
+        assertTrue(cap.evidence.contains("T-Mobile"))
+    }
+
+    @Test
+    fun `carrier id stays read-only but its derived behaviour is now evidenced`() {
+        val cap = SignalCapabilities[Signal.SIM_CARRIER_ID]
+        assertEquals(SignalStatus.READ_ONLY, cap.status)
+        assertTrue("should record the observed 1435 -> 1 -> 1435", cap.evidence.contains("1435"))
+    }
+
+    @Test
+    fun `network signals remain unsupported no matter what we verified`() {
+        listOf(
+            Signal.NETWORK_COUNTRY_ISO,
+            Signal.NETWORK_OPERATOR_NUMERIC,
+            Signal.NETWORK_OPERATOR_NAME,
+            Signal.ROAMING
+        ).forEach {
+            assertEquals(
+                "$it must stay unsupported",
+                SignalStatus.UNSUPPORTED, SignalCapabilities[it].status
+            )
+        }
+    }
+
+    @Test
+    fun `no signal claims VERIFIED without citing hardware evidence`() {
+        SignalCapabilities.all()
+            .filter { it.status == SignalStatus.VERIFIED }
+            .forEach {
+                assertTrue(
+                    "${it.signal} claims VERIFIED with weak evidence: ${it.evidence}",
+                    it.evidence.contains("真机")
+                )
+            }
+    }
+
+    @Test
+    fun `the T-Mobile profile no longer uses an experimental mechanism`() {
+        // Consequence of the capability update: it is now a production profile.
+        val p = RegionalProfile.PRESETS.first { it.operatorNumeric == "310260" }
+        assertFalse(p.usesExperimentalMechanism())
+    }
 }

@@ -24,24 +24,26 @@ object SignalCapabilities {
     private val table: Map<Signal, Capability> = listOf(
         Capability(
             Signal.SIM_COUNTRY_ISO, SignalStatus.VERIFIED,
-            "真机实验：经 CarrierService 下发 KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING，" +
-                    "getSimCountryIso() 确实 cn → us，且网络侧、MCC/MNC、Carrier ID、APN 均未变"
+            "真机 run #12/#13/#14：经 CarrierService 下发 KEY_SIM_COUNTRY_ISO_OVERRIDE_STRING，" +
+                    "getSimCountryIso() 确实 cn → us → cn，还原经回读校验；" +
+                    "仅改国家码时网络侧、MCC/MNC、Carrier ID、APN 均未变"
         ),
         Capability(
-            Signal.SIM_OPERATOR_NAME, SignalStatus.EXPERIMENTAL,
-            "机制与国家码相同（KEY_CARRIER_NAME_OVERRIDE_BOOL + KEY_CARRIER_NAME_STRING），" +
-                    "但尚未单独在真机上核验 getSimOperatorName() 的变化"
+            Signal.SIM_OPERATOR_NAME, SignalStatus.VERIFIED,
+            "真机 run #13/#14：CMCC → T-Mobile 回读生效，还原后回到 CMCC"
         ),
         Capability(
-            Signal.SIM_OPERATOR_NUMERIC, SignalStatus.EXPERIMENTAL,
-            "CarrierConfig 中不存在 MCC/MNC 键，只能经 setCarrierTestOverride 写 " +
-                    "gsm.sim.operator.numeric。源码上成立，真机未验证，且会连带改变 Carrier ID、" +
-                    "可能影响 APN 匹配"
+            Signal.SIM_OPERATOR_NUMERIC, SignalStatus.VERIFIED,
+            "真机 run #13/#14：46000 → 310260 → 46000 回读生效并完整还原。" +
+                    "CarrierConfig 中不存在 MCC/MNC 键，机制为 setCarrierTestOverride 写 " +
+                    "gsm.sim.operator.numeric。已知连带影响：Carrier ID 随之改变（预期内）、" +
+                    "APN 按运营商代码重新匹配；实测移动数据保持正常，网络侧 MCC/MNC 与国家码未变"
         ),
         Capability(
             Signal.SIM_CARRIER_ID, SignalStatus.READ_ONLY,
             "CarrierResolver 依 getSimOperatorNumericForPhone() 查 carrier-id 数据库推导，" +
-                    "没有直接写入口；只会随 MCC/MNC 间接变化"
+                    "没有直接写入口。真机 run #13/#14 证实其随 MCC/MNC 间接变化：" +
+                    "1435 → 1 → 1435，属预期而非副作用"
         ),
         Capability(
             Signal.NETWORK_COUNTRY_ISO, SignalStatus.UNSUPPORTED,
@@ -61,11 +63,13 @@ object SignalCapabilities {
         ),
         Capability(
             Signal.CARRIER_CONFIG, SignalStatus.VERIFIED,
-            "真机实验：注册为 CarrierService 后返回的 bundle 确实被合并进最终 CarrierConfig"
+            "真机实验：注册为 CarrierService 后返回的 bundle 确实被合并进最终 CarrierConfig；" +
+                    "run #14 另证实还原后国家码键回到原始的「不存在」状态"
         ),
         Capability(
             Signal.APN_DATA, SignalStatus.READ_ONLY,
-            "本项目**刻意不修改** APN；仅作为安全核验项观测，任何变化都视为副作用"
+            "本项目**刻意不修改** APN；仅作为安全核验项观测。改动 MCC/MNC 时框架会按运营商代码" +
+                    "重新匹配 APN，此为预期；真机 run #13/#14 下移动数据始终正常，还原后 APN 回到原值"
         ),
         Capability(
             Signal.LOCALE_TIMEZONE, SignalStatus.READ_ONLY,
